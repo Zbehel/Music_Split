@@ -1,0 +1,48 @@
+# Configuration pour l'auto-labeling des Pull Requests
+
+documentation:
+  - changed-files:
+    - any-glob-to-any-file: '**/*.md'
+    - any-glob-to-any-file: 'docs/**/*'
+
+tests:
+  - changed-files:
+    - any-glob-to-any-file: 'tests/**/*'
+    - any-glob-to-any-file: 'conftest.py'
+    - any-glob-to-any-file: 'pytest.ini'
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file: 'requirements*.txt'
+    - any-glob-to-any-file: 'setup.py'
+    - any-glob-to-any-file: 'pyproject.toml'
+
+docker:
+  - changed-files:
+    - any-glob-to-any-file: 'dockerfile'
+    - any-glob-to-any-file: 'docker-compose.yml'
+    - any-glob-to-any-file: '.dockerignore'
+
+kubernetes:
+  - changed-files:
+    - any-glob-to-any-file: 'k8s/**/*'
+
+ci-cd:
+  - changed-files:
+    - any-glob-to-any-file: '.github/workflows/**/*'
+
+api:
+  - changed-files:
+    - any-glob-to-any-file: 'src/api.py'
+    - any-glob-to-any-file: 'src/config.py'
+
+core:
+  - changed-files:
+    - any-glob-to-any-file: 'src/separator.py'
+    - any-glob-to-any-file: 'src/__init__.py'
+
+enhancement:
+  - head-branch: ['^feature', 'feature']
+
+bugfix:
+  - head-branch: ['^fix', '^hotfix', 'bugfix']
