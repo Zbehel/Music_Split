@@ -17,7 +17,7 @@ def generate_test_audio(duration_seconds: int, output_path: str) -> str:
     sample_rate = 44100
     samples = sample_rate * duration_seconds
     audio = torch.randn(2, samples)  # Stereo
-    torchaudio.save(output_path, audio, sample_rate)
+    torchaudio.save(output_path, audio, sample_rate, backend="soundfile")
     return output_path
 
 

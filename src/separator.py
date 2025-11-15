@@ -146,7 +146,13 @@ class MusicSeparator:
         for i, stem_name in enumerate(self.stems):
             stem_audio = sources[i].cpu()
             save_path = output_path / f"{stem_name}.{save_format}"
-            torchaudio.save(str(save_path), stem_audio, self.sample_rate)
+            # Utiliser backend soundfile explicitement pour éviter torchcodec
+            torchaudio.save(
+                str(save_path), 
+                stem_audio, 
+                self.sample_rate,
+                backend="soundfile"
+            )
             results[stem_name] = str(save_path)
             print(f"✓ Saved: {save_path}")
         
