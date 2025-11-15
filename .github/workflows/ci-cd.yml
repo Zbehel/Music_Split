@@ -341,4 +341,4 @@ jobs:
           --users 10 \
           --spawn-rate 2 \
           --run-time 60s \
-          --host ${{ secrets.STAGING_URL }}
+          --host ${{ secrets.STAGING_URL }
