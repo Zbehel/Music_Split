@@ -78,6 +78,21 @@ jobs:
       image_digest: ${{ steps.build.outputs.digest }}
     
     steps:
+    - name: Free disk space
+      run: |
+        echo "Disk space before cleanup:"
+        df -h
+        # Remove unnecessary packages and files
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        # Clean Docker if it exists
+        docker system prune -af --volumes || true
+        echo "Disk space after cleanup:"
+        df -h
+    
     - name: Checkout code
       uses: actions/checkout@v4
     
@@ -112,12 +127,20 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:buildcache
-        cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:buildcache,mode=max
+        # Use inline cache instead of registry cache to save space
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
         build-args: |
           BUILD_DATE=${{ github.event.head_commit.timestamp }}
           VCS_REF=${{ github.sha }}
           VERSION=${{ steps.meta.outputs.version }}
+    
+    - name: Clean up Docker
+      if: always()
+      run: |
+        docker system prune -af --volumes || true
+        echo "Final disk space:"
+        df -h
 
   # ============================================================
   # JOB 3: SECURITY SCAN
