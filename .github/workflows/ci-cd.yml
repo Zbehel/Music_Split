@@ -12,6 +12,12 @@ env:
   DOCKER_IMAGE: music-separator
   PYTHON_VERSION: "3.11"
 
+# Permissions nécessaires pour les différents jobs
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
 jobs:
   # ============================================================
   # JOB 1: TESTS ET QUALITÉ DU CODE
@@ -121,6 +127,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      security-events: write  # Nécessaire pour upload SARIF
     
     steps:
     - name: Checkout code
@@ -135,7 +144,7 @@ jobs:
         severity: 'CRITICAL,HIGH'
     
     - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: 'trivy-results.sarif'
       if: always()
