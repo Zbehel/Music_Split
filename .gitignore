@@ -1,0 +1,297 @@
+# === FICHIERS AUDIO & MEDIA ===
+# Fichiers audio (inputs)
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.wma
+*.aiff
+*.ape
+
+# Fichiers vidéo
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+
+# Dossiers audio
+separated/
+output/
+results/
+stems/
+audio_files/
+test_audio/
+downloads/
+uploads/
+temp_audio/
+
+# === MODÈLES ML (TRÈS LOURDS) ===
+# Modèles Demucs (350MB+)
+*.th
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+models/
+checkpoints/
+pretrained/
+weights/
+
+# Cache modèles
+.demucs/
+.cache/
+huggingface/
+
+# TensorFlow
+*.pb
+*.tflite
+saved_model/
+
+# ONNX
+*.onnx
+
+# === DATASETS (TRÈS LOURDS) ===
+musdb18/
+MUSDB18/
+MIMII/
+datasets/
+data/raw/
+data/processed/
+
+# === PYTHON ===
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+.hypothesis/
+pytest_debug.log
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# pyenv
+.python-version
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# === DOCKER ===
+# Volumes Docker
+docker-volumes/
+docker-data/
+
+# === KUBERNETES ===
+# Secrets
+secrets/
+*.secret
+*.key
+
+# Helm
+charts/*.tgz
+
+# Kustomize
+kustomization.yaml.bak
+
+# === CI/CD ===
+# GitLab
+.gitlab-ci-local/
+
+# GitHub Actions
+.github/workflows/*.bak
+
+# === MONITORING & LOGS ===
+# Logs
+logs/
+*.log
+log/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Prometheus data
+prometheus-data/
+
+# Grafana
+grafana-data/
+
+# === RÉSULTATS & TEMPORAIRES ===
+# Résultats benchmarks
+benchmark_output/
+benchmark_results/
+load_test_results/
+*.benchmark
+
+# Fichiers temporaires
+tmp/
+temp/
+.tmp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# === OS SPECIFIC ===
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# === IDE & EDITORS ===
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# === ENVIRONNEMENT ===
+# Variables d'environnement
+.env
+.env.local
+.env.*.local
+*.env
+
+# Config locale
+config.local.yaml
+config.local.json
+
+# === BASES DE DONNÉES ===
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# PostgreSQL
+*.dump
+
+# Redis
+dump.rdb
+
+# === NODE (si frontend ajouté) ===
+node_modules/
+package-lock.json
+yarn.lock
+
+# === AUTRES ===
+# Backup files
+*.bak
+*.backup
+*~
+
+# Compressed files (sauf si nécessaire)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Large binary files
+*.bin
+*.dat
+
+# Profiling
+*.prof
+*.lprof
+
+# === PROJET SPÉCIFIQUE ===
+# Job results storage
+results/*/
+jobs/*/
+
+# Downloaded songs for testing
+test_songs/
+demo_audio/
+
+# Generated spectrograms
+spectrograms/
+visualizations/
+
+# Exports
+exports/

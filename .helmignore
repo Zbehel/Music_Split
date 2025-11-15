@@ -1,0 +1,27 @@
+# .helmignore
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Development
+.vscode/
+.idea/
+
+# Tests
+tests/
+
+# Documentation
+*.md
+docs/
+
+# Temporary
+*.tmp
+tmp/
+
+# OS
+.DS_Store
