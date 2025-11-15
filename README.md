@@ -151,10 +151,6 @@ Music_Split/
 - PyTorch 2.2.2+
 - Demucs 4.0.1
 
-
-![CI/CD](https://github.com/Zbehel/Music_Split/VOTRE-REPO/workflows/CI/CD%20Pipeline/badge.svg)
-![Tests](https://github.com/Zbehel/Music_Split/workflows/Pull%20Request%20Checks/badge.svg)
-
 ## License
 
 [Add your license here]
