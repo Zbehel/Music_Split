@@ -10,14 +10,21 @@ services:
       - ./src:/app/src  # Hot reload dev
     environment:
       - MODEL_NAME=htdemucs
-      - DEVICE=cuda
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - DEVICE=cpu
+      - MAX_FILE_SIZE_MB=100
+      - MAX_DURATION_SECONDS=600
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - RESULTS_DIR=results
+      - OUTPUT_FORMAT=wav
+    # Décommenter pour GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     
   # Redis pour queue (futur)
   redis:

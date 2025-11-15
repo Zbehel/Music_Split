@@ -14,10 +14,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copier code
 COPY src/ ./src/
-COPY .env .
 
 # Télécharger modèle au build (évite download à chaque run)
 RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
+
+# Variables d'environnement par défaut (peuvent être surchargées)
+ENV MODEL_NAME=htdemucs
+ENV DEVICE=cpu
+ENV API_HOST=0.0.0.0
+ENV API_PORT=8000
+ENV MAX_FILE_SIZE_MB=100
+ENV MAX_DURATION_SECONDS=600
+ENV RESULTS_DIR=results
+ENV OUTPUT_FORMAT=wav
 
 # Exposer port API
 EXPOSE 8000
