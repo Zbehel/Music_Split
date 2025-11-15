@@ -17,7 +17,7 @@ def test_audio_file(tmp_path):
     """Generate test audio file"""
     audio = torch.randn(2, 44100 * 10)  # 10s stereo
     test_file = tmp_path / "test.wav"
-    torchaudio.save(str(test_file), audio, 44100)
+    torchaudio.save(str(test_file), audio, 44100, backend="soundfile")
     return test_file
 
 

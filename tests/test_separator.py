@@ -10,7 +10,7 @@ def test_audio(tmp_path):
     """Generate test audio file"""
     audio = torch.randn(2, 44100 * 10)  # 10s stereo
     test_file = tmp_path / "test.wav"
-    torchaudio.save(str(test_file), audio, 44100)
+    torchaudio.save(str(test_file), audio, 44100, backend="soundfile")
     return test_file
 
 
@@ -153,7 +153,7 @@ class TestMusicSeparator:
         # Create mono audio
         audio = torch.randn(1, 44100 * 5)  # 5s mono
         test_file = tmp_path / "test_mono.wav"
-        torchaudio.save(str(test_file), audio, 44100)
+        torchaudio.save(str(test_file), audio, 44100, backend="soundfile")
         
         separator = MusicSeparator(model_name='htdemucs')
         output_dir = tmp_path / "output_mono"
@@ -170,7 +170,7 @@ class TestMusicSeparator:
         # Create audio with different sample rate
         audio = torch.randn(2, 48000 * 5)  # 5s @ 48kHz
         test_file = tmp_path / "test_48k.wav"
-        torchaudio.save(str(test_file), audio, 48000)
+        torchaudio.save(str(test_file), audio, 48000, backend="soundfile")
         
         separator = MusicSeparator(model_name='htdemucs')
         output_dir = tmp_path / "output_48k"
