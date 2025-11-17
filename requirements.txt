@@ -1,8 +1,39 @@
+# Core API
+fastapi==0.115.2
+uvicorn[standard]==0.38.0
+# Gradio >=5.49 exige python-multipart >=0.0.18
+python-multipart==0.0.18
+pydantic==2.9.2
+pydantic-settings==2.6.1
+
+# YouTube download
+yt-dlp==2025.11.12
+
+# Demucs / Torch
 demucs==4.0.1
-torch==2.6.0
-torchaudio==2.6.0
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-pydantic-settings==2.1.0
-soundfile>=0.12.1  # Backend pour torchaudio
+torch==2.9.1
+torchaudio==2.9.1
+
+# Audio processing
+numpy==2.1.2
+soundfile==0.12.1
+# (librosa / scipy non utilisés -> retirés pour éviter les conflits numpy>=2)
+
+# Gradio interface
+gradio==5.49.1
+huggingface_hub==0.34.4  # >=0.33 requis par Gradio 5.x
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# Testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# MVSEP models (audio-separator)
+audio-separator==0.39.1
+onnxruntime==1.23.1  # Requis par audio-separator
+
+

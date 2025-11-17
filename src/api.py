@@ -1,226 +1,224 @@
-from fastapi import FastAPI, File, UploadFile, BackgroundTasks, HTTPException, Query
+"""
+FastAPI backend pour Music Source Separator
+Support Demucs + MVSEP models
+"""
+
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
+from typing import Dict, List, Optional
 import tempfile
 import shutil
-from pathlib import Path
-import uuid
-from typing import Optional
-from src.separator import MusicSeparator, list_available_models
-from src.config import settings
-import torchaudio
+import logging
+from datetime import datetime
 
+from src.separator import get_separator, clear_cache, MusicSeparator
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Créer l'application FastAPI
 app = FastAPI(
-    title="Music Separation API",
-    description="Separate audio tracks into individual stems using deep learning",
-    version="1.0.0",
+    title="Music Source Separator API",
+    description="Sépare les pistes audio avec Demucs et MVSEP",
+    version="2.0.0"
 )
 
-# Stockage temporaire des résultats
-RESULTS_DIR = Path(settings.results_dir)
-RESULTS_DIR.mkdir(exist_ok=True)
+# CORS pour Gradio
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Cache de separators pour différents modèles
-separator_cache = {}
-
-
-def get_separator(model_name: str) -> MusicSeparator:
-    """Get or create separator for a model"""
-    if model_name not in separator_cache:
-        separator_cache[model_name] = MusicSeparator(
-            model_name=model_name, device=settings.device
-        )
-    return separator_cache[model_name]
+# Dossier temporaire pour les résultats
+TEMP_DIR = Path("/tmp/music-separator")
+TEMP_DIR.mkdir(exist_ok=True)
 
 
 @app.get("/")
 def root():
-    """API root"""
-    return {"name": "Music Separation API", "version": "1.0.0", "docs": "/docs"}
+    """Page d'accueil"""
+    return {
+        "message": "Music Source Separator API v2.0",
+        "docs": "/docs",
+        "health": "/health",
+        "models": "/models"
+    }
 
 
 @app.get("/health")
 def health_check():
     """Health check endpoint"""
+    from src.separator import get_best_device
+    import torch
+    
+    device = get_best_device()
+    device_info = {
+        "current": device,
+        "cuda_available": torch.cuda.is_available(),
+        "mps_available": hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() if hasattr(torch.backends, 'mps') else False,
+    }
+    
     return {
         "status": "healthy",
-        "device": settings.device,
-        "default_model": settings.model_name,
+        "device": device,
+        "device_info": device_info,
+        "models_loaded": list(get_separator.__globals__.get('_loaded_models', {}).keys()),
+        "timestamp": datetime.now().isoformat()
     }
 
 
 @app.get("/models")
-def list_models():
-    """List all available separation models"""
-    models = list_available_models()
-    return {"models": models, "default": settings.model_name, "total": len(models)}
-
-
-@app.get("/models/{model_name}/info")
-def get_model_info(model_name: str):
-    """Get information about a specific model"""
-    try:
-        separator = get_separator(model_name)
-        return separator.info
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Model not found: {str(e)}")
-
-
-@app.post("/separate")
-async def separate_music(
-    file: UploadFile = File(...),
-    model_name: Optional[str] = Query(
-        None, description="Model to use (default: htdemucs)"
-    ),
-    output_format: Optional[str] = Query(
-        "wav", description="Output format (wav, mp3, flac)"
-    ),
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    Upload audio file and separate into stems
-
-    Args:
-        file: Audio file to separate
-        model_name: Model to use (optional, defaults to config)
-        output_format: Output format for stems
-
-    Returns:
-        Job ID and download URLs for stems
-    """
-    # Validate model
-    model = model_name or settings.model_name
-    available_models = list_available_models()
-    if model not in available_models:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid model '{model}'. Available: {available_models}",
-        )
-
-    # Validate file size
-    file.file.seek(0, 2)  # Seek to end
-    file_size = file.file.tell()
-    file.file.seek(0)  # Reset
-
-    max_size_bytes = settings.max_file_size_mb * 1024 * 1024
-    if file_size > max_size_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Max size: {settings.max_file_size_mb}MB",
-        )
-
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith("audio/"):
-        if not any(
-            file.filename.endswith(ext)
-            for ext in [".mp3", ".wav", ".flac", ".ogg", ".m4a"]
-        ):
-            raise HTTPException(
-                status_code=400, detail="Invalid file type. Must be an audio file"
-            )
-
-    # Generate unique job ID
-    job_id = str(uuid.uuid4())
-    job_dir = RESULTS_DIR / job_id
-    job_dir.mkdir(exist_ok=True)
-
-    # Save uploaded file
-    input_path = job_dir / f"input{Path(file.filename).suffix}"
-    try:
-        with open(input_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-
-    # Validate audio duration (optional check)
-    try:
-        info = torchaudio.info(str(input_path))
-        duration = info.num_frames / info.sample_rate
-        if duration > settings.max_duration_seconds:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Audio too long. Max duration: {settings.max_duration_seconds}s",
-            )
-    except Exception as e:
-        # If we can't read the file, let the separator handle it
-        pass
-
-    # Separate (synchronous for now)
-    try:
-        separator = get_separator(model)
-        results = separator.separate(
-            str(input_path), str(job_dir), save_format=output_format
-        )
-
-        return {
-            "job_id": job_id,
-            "status": "completed",
-            "model": model,
-            "stems": {
-                stem: f"/download/{job_id}/{Path(path).name}"
-                for stem, path in results.items()
-            },
-            "info": separator.info,
-        }
-    except Exception as e:
-        # Cleanup on error
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Separation failed: {str(e)}")
-
-
-@app.get("/download/{job_id}/{filename}")
-def download_stem(job_id: str, filename: str):
-    """Download separated stem"""
-    file_path = RESULTS_DIR / job_id / filename
-
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # Security: ensure path is within RESULTS_DIR
-    if not str(file_path.resolve()).startswith(str(RESULTS_DIR.resolve())):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    return FileResponse(
-        path=str(file_path),
-        media_type=f"audio/{file_path.suffix[1:]}",
-        filename=filename,
-    )
-
-
-@app.get("/jobs/{job_id}")
-def get_job_status(job_id: str):
-    """Check job status"""
-    job_dir = RESULTS_DIR / job_id
-
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    stems = [f for f in job_dir.glob("*") if f.suffix in [".wav", ".mp3", ".flac"]]
-    stems = [f for f in stems if not f.name.startswith("input")]
-
+def get_models():
+    """Liste des modèles disponibles"""
+    models = MusicSeparator.get_available_models()
+    
     return {
-        "job_id": job_id,
-        "status": "completed" if stems else "processing",
-        "stems_count": len(stems),
-        "files": [f.name for f in stems],
+        "models": list(models.keys()),
+        "details": models
     }
 
 
-@app.delete("/jobs/{job_id}")
-def delete_job(job_id: str):
-    """Delete job and its results"""
-    job_dir = RESULTS_DIR / job_id
-
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Job not found")
-
+@app.get("/models/{model_name}")
+def get_model_info(model_name: str):
+    """Info sur un modèle spécifique"""
     try:
-        shutil.rmtree(job_dir)
-        return {"status": "deleted", "job_id": job_id}
+        info = MusicSeparator.get_model_info(model_name)
+        return info
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/separate")
+async def separate_audio(
+    file: UploadFile = File(...),
+    model_name: str = Form(default="htdemucs_6s")
+):
+    """
+    Sépare un fichier audio en stems
+    
+    Args:
+        file: Fichier audio (WAV, MP3, FLAC, etc.)
+        model_name: Modèle à utiliser (htdemucs_6s, htdemucs_ft, mvsep_full)
+        
+    Returns:
+        JSON avec chemins des stems générés
+    """
+    logger.info(f"Nouvelle requête de séparation avec modèle: {model_name}")
+    
+    # Vérifier que le modèle existe
+    if model_name not in MusicSeparator.AVAILABLE_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Modèle '{model_name}' non disponible. "
+                   f"Choisir parmi: {list(MusicSeparator.AVAILABLE_MODELS.keys())}"
+        )
+    
+    # Créer un dossier temporaire unique
+    temp_session = tempfile.mkdtemp(dir=TEMP_DIR)
+    temp_path = Path(temp_session)
+    
+    try:
+        # Sauvegarder le fichier uploadé
+        input_file = temp_path / "input.wav"
+        with input_file.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
+        
+        logger.info(f"Fichier sauvegardé: {input_file}")
+        
+        # Créer le dossier de sortie
+        output_dir = temp_path / "output"
+        output_dir.mkdir(exist_ok=True)
+        
+        # Récupérer le séparateur (avec cache)
+        separator = get_separator(model_name)
+        
+        # Séparer l'audio
+        logger.info("Début de la séparation...")
+        results = separator.separate(str(input_file), str(output_dir))
+        
+        logger.info(f"Séparation terminée: {len(results)} stems générés")
+        
+        # Retourner les chemins des fichiers
+        return {
+            "status": "success",
+            "model_used": model_name,
+            "stems_count": len(results),
+            "stems": results,
+            "session_id": temp_path.name
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
+        logger.error(f"Erreur lors de la séparation: {str(e)}")
+        # Nettoyer en cas d'erreur
+        shutil.rmtree(temp_path, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/download/{session_id}/{stem_name}")
+def download_stem(session_id: str, stem_name: str):
+    """
+    Télécharge un stem spécifique
+    
+    Args:
+        session_id: ID de session (nom du dossier temp)
+        stem_name: Nom du stem (ex: "vocals", "drums")
+    """
+    file_path = TEMP_DIR / session_id / "output" / f"{stem_name}.wav"
+    
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Fichier {stem_name}.wav non trouvé"
+        )
+    
+    return FileResponse(
+        path=str(file_path),
+        media_type="audio/wav",
+        filename=f"{stem_name}.wav"
+    )
+
+
+@app.post("/clear-cache")
+def clear_model_cache():
+    """Vide le cache des modèles chargés"""
+    clear_cache()
+    return {"status": "cache cleared"}
+
+
+@app.delete("/cleanup/{session_id}")
+def cleanup_session(session_id: str):
+    """
+    Nettoie les fichiers temporaires d'une session
+    
+    Args:
+        session_id: ID de session à nettoyer
+    """
+    session_path = TEMP_DIR / session_id
+    
+    if session_path.exists():
+        shutil.rmtree(session_path)
+        return {"status": "cleaned", "session_id": session_id}
+    else:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+
+
+@app.post("/cleanup-all")
+def cleanup_all():
+    """Nettoie tous les fichiers temporaires"""
+    count = 0
+    for item in TEMP_DIR.iterdir():
+        if item.is_dir():
+            shutil.rmtree(item)
+            count += 1
+    
+    return {"status": "all cleaned", "sessions_removed": count}
 
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host=settings.api_host, port=settings.api_port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
