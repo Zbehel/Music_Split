@@ -1,5 +1,8 @@
-"""Music Split - Source separation package"""
+"""
+Music Source Separator Package
+"""
 
-from .separator import MusicSeparator, ModelConfig, list_available_models
+from .separator import MusicSeparator, get_separator, clear_cache, get_best_device
 
-__all__ = ["MusicSeparator", "ModelConfig", "list_available_models"]
+__version__ = "2.0.0"
+__all__ = ["MusicSeparator", "get_separator", "clear_cache", "get_best_device"]

@@ -1,11 +1,13 @@
+
 services:
   # API FastAPI
   api:
     build:
       context: .
-      dockerfile: dockerfile
-    image: music-separator:latest
+      dockerfile: dockerfile.arm64
+    image: music-separator:arm64
     container_name: music-separator-api
+    platform: linux/arm64
     ports:
       - "8000:8000"
     volumes:
@@ -14,29 +16,25 @@ services:
       - temp_audio:/tmp/music-separator
     environment:
       - PYTHONUNBUFFERED=1
+      - DEVICE=cpu
+      - DEMUCS_USE_TORCHCODEC=0
     command: uvicorn src.api:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          memory: 4G
 
   # Interface Gradio
   gradio:
     build:
       context: .
-      dockerfile: dockerfile
-    image: music-separator:latest
+      dockerfile: dockerfile.arm64
+    image: music-separator:arm64
     container_name: music-separator-gradio
+    platform: linux/arm64
     ports:
       - "7860:7860"
     volumes:
@@ -56,15 +54,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-        reservations:
-          memory: 2G
 
 volumes:
   models_cache:
