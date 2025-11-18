@@ -1,0 +1,81 @@
+groups:
+  - name: music_separator_alerts
+    interval: 30s
+    rules:
+      # ============================================================
+      # API Availability Alerts
+      # ============================================================
+      - alert: APIDown
+        expr: up{job="music-separator-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Music Separator API is down"
+          description: "The Music Separator API has been down for more than 1 minute."
+
+      # ============================================================
+      # High Error Rate
+      # ============================================================
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is above 5% for the last 5 minutes."
+
+      # ============================================================
+      # High Response Time
+      # ============================================================
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High response time detected"
+          description: "95th percentile response time is above 10 seconds."
+
+      # ============================================================
+      # High Memory Usage
+      # ============================================================
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes{name="music-separator-api"} / container_spec_memory_limit_bytes{name="music-separator-api"}) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is above 90% for more than 5 minutes."
+
+      # ============================================================
+      # High CPU Usage
+      # ============================================================
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{name="music-separator-api"}[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is above 80% for more than 10 minutes."
+
+      # ============================================================
+      # Container Restart Alert
+      # ============================================================
+      - alert: ContainerRestarted
+        expr: rate(container_last_seen{name="music-separator-api"}[5m]) > 2
+        for: 1m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Container frequently restarting"
+          description: "Container has restarted more than 2 times in the last 5 minutes."

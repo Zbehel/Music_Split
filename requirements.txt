@@ -11,8 +11,8 @@ yt-dlp==2025.11.12
 
 # Demucs / Torch
 demucs==4.0.1
-torch==2.9.1
-torchaudio==2.9.1
+torch==2.8.0
+torchaudio==2.8.0
 
 # Audio processing
 numpy==2.1.2

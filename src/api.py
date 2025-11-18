@@ -4,6 +4,7 @@ WITH: Monitoring, Structured Logging, Resilience Patterns
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request, Response
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
@@ -98,7 +99,8 @@ async def metrics_middleware(request: Request, call_next):
     
     # Create logger with context
     request_logger = get_logger(__name__, {"request_id": request_id})
-    
+
+    status: int = 500  # Default status
     try:
         response = await call_next(request)
         status = response.status_code
@@ -264,19 +266,19 @@ def get_model_info(model_name: str):
 async def separate_audio(
     request: Request,
     file: UploadFile = File(...),
-    model_name: str = Form(default="htdemucs_6s")
+    demucs_model: str = Form(default="htdemucs_6s", alias="model_name")
 ):
     """
     Sépare un fichier audio en stems
     WITH: Metrics, structured logging, rate limiting, circuit breaker
-    
+
     Args:
         file: Fichier audio (WAV, MP3, FLAC, etc.)
         model_name: Modèle à utiliser (htdemucs_6s, htdemucs_ft, etc.)
-        
+
     Returns:
         JSON avec chemins des stems générés
-        
+
     Raises:
         HTTPException: Si le modèle n'existe pas ou erreur pendant la séparation
     """
@@ -303,14 +305,14 @@ async def separate_audio(
     logger.info(
         f"Separation request",
         extra={
-            "model": model_name,
-            "filename": file.filename,
+            "model": demucs_model,
+            "uploaded_filename": file.filename,
             "client_ip": client_ip
         }
     )
-    
+
     # ✅ Check model exists
-    if model_name not in STEM_CONFIGS:
+    if demucs_model not in STEM_CONFIGS:
         available = list(STEM_CONFIGS.keys())
         errors_total.labels(
             type="InvalidModel",
@@ -318,7 +320,7 @@ async def separate_audio(
         ).inc()
         raise HTTPException(
             status_code=400,
-            detail=f"Modèle '{model_name}' non disponible. "
+            detail=f"Modèle '{demucs_model}' non disponible. "
                    f"Modèles disponibles: {available}"
         )
     
@@ -356,8 +358,8 @@ async def separate_audio(
         try:
             @model_circuit_breaker.call
             def get_separator_safe():
-                return get_separator(model_name)
-            
+                return get_separator(demucs_model)
+
             separator = get_separator_safe()
         except CircuitBreakerOpen:
             logger.error("Circuit breaker open for model loading")
@@ -365,63 +367,66 @@ async def separate_audio(
                 status_code=503,
                 detail="Model service temporarily unavailable. Try again later."
             )
-        
+
         # ✅ Separate audio with retry
         separation_start = time.time()
-        
+
         @retry(max_attempts=2, delay=1.0, exceptions=(Exception,))
-        def separate_with_retry():
+        def separate_with_retry() -> Dict[str, str]:
             return separator.separate(str(input_file), str(output_dir))
-        
+
         try:
             results = separate_with_retry()
+            if results is None:
+                raise HTTPException(status_code=500, detail="Separation returned no results")
         except RetryExhausted as e:
             logger.error(f"Separation failed after retries: {e}")
             separations_total.labels(
-                model=model_name,
+                model=demucs_model,
                 status="error"
             ).inc()
             raise HTTPException(status_code=500, detail="Separation failed after retries")
-        
+
         separation_duration = time.time() - separation_start
-        
+        stems_count = len(results)
+
         # ✅ Update metrics
         separations_total.labels(
-            model=model_name,
+            model=demucs_model,
             status="success"
         ).inc()
-        
+
         separation_duration_seconds.labels(
-            model=model_name
+            model=demucs_model
         ).observe(separation_duration)
-        
+
         # ✅ Structured logging
         log_separation(
             logger,
-            model=model_name,
+            model=demucs_model,
             audio_duration=0,  # Could calculate from file if needed
             processing_duration=separation_duration,
             status="success",
             session_id=temp_path.name,
-            stems_count=len(results),
+            stems_count=stems_count,
             file_size_bytes=file_size
         )
-        
+
         logger.info(
             f"Separation completed",
             extra={
-                "model": model_name,
-                "stems_count": len(results),
+                "model": demucs_model,
+                "stems_count": stems_count,
                 "duration_seconds": separation_duration,
                 "session_id": temp_path.name
             }
         )
-        
+
         # Retourner les chemins des fichiers
         return {
             "status": "success",
-            "model_used": model_name,
-            "stems_count": len(results),
+            "model_used": demucs_model,
+            "stems_count": stems_count,
             "stems": results,
             "session_id": temp_path.name,
             "processing_time_seconds": separation_duration
@@ -433,21 +438,21 @@ async def separate_audio(
         logger.error(
             f"Error during separation",
             extra={
-                "model": model_name,
+                "model": demucs_model,
                 "error": str(e),
                 "session_id": temp_path.name
             },
             exc_info=True
         )
-        
+
         # Update error metrics
         errors_total.labels(
             type=type(e).__name__,
             endpoint="/separate"
         ).inc()
-        
+
         separations_total.labels(
-            model=model_name,
+            model=demucs_model,
             status="error"
         ).inc()
         
