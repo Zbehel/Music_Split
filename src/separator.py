@@ -1,4 +1,6 @@
 """Music Source Separator - Sans TorchCodec/FFmpeg"""
+from src.stems import STEM_CONFIGS, get_stems, get_num_stems
+
 import torch
 import numpy as np
 from pathlib import Path
@@ -29,29 +31,28 @@ def get_best_device() -> str:
 
 
 class MusicSeparator:
+    # ✅ Use shared config instead of duplicating
     AVAILABLE_MODELS = {
-        "htdemucs_6s": {
+        model_name: {
+            "names": config["stems"],
+            "description": config["description"],
             "type": "demucs",
-            "stems": 6,
-            "names": ["drums", "bass", "other", "vocals", "guitar", "piano"],
-            "description": "6 stems complet"
-        },
-        "htdemucs_ft": {
-            "type": "demucs",
-            "stems": 4,
-            "names": ["drums", "bass", "other", "vocals"],
-            "description": "4 stems haute qualité"
-        },
+            "description": config['desc']
+        }
+        for model_name, config in STEM_CONFIGS.items()
     }
     
-    def __init__(self, model_name: str = "htdemucs_6s", device: Optional[str] = None):
+    def __init__(self, model_name: str = "htdemucs_6s", device=None):
         if model_name not in self.AVAILABLE_MODELS:
-            raise ValueError(f"Modèle invalide: {model_name}")
+            raise ValueError(f"Unknown model: {model_name}")
+        
         self.model_name = model_name
         self.model_config = self.AVAILABLE_MODELS[model_name]
-        self.model_type = self.model_config["type"]
+        self.stems = get_stems(model_name)  # ✅ Get from shared config
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
+        self.model_type = self.model_config["type"]
+        
         logger.info(f"Init {model_name} sur {self.device}")
         
     def _load_model(self):
