@@ -31,17 +31,10 @@ case $choice in
         echo -e "${BLUE}🐳 Mode Docker${NC}"
         echo ""
         
-        # Détecter architecture
-        ARCH=$(uname -m)
-        if [[ "$ARCH" == "arm64" ]] || [[ "$ARCH" == "aarch64" ]]; then
-            echo -e "${YELLOW}🍎 Mac ARM détecté (M1/M2/M3)${NC}"
-            COMPOSE_FILE="docker-compose.arm64.yml"
-            DOCKERFILE="dockerfile.arm64"
-        else
-            echo -e "${GREEN}💻 Architecture x86_64 détectée${NC}"
-            COMPOSE_FILE="docker-compose.yml"
-            DOCKERFILE="dockerfile"
-        fi
+        # Use monitoring docker-compose (unified)
+        COMPOSE_FILE="monitoring/docker-compose.yml"
+        DOCKERFILE="dockerfile"
+        echo -e "${GREEN}💻 Using unified configuration${NC}"
         echo ""
         
         # Vérifier Docker

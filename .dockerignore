@@ -1,12 +1,7 @@
 # Git
-.git/
+.git
 .gitignore
-.github/
-
-# Environment
-.env
-.env.*
-*.env
+.gitattributes
 
 # Python
 __pycache__/
@@ -14,25 +9,13 @@ __pycache__/
 *$py.class
 *.so
 .Python
-*.egg-info/
-dist/
-build/
-venv/
 env/
+venv/
 ENV/
-
-# Tests
-tests/
+*.egg-info/
 .pytest_cache/
 .coverage
 htmlcov/
-*.log
-
-# Documentation
-*.md
-docs/
-README.md
-CHANGELOG.md
 
 # IDE
 .vscode/
@@ -41,47 +24,36 @@ CHANGELOG.md
 *.swo
 *~
 
-# OS
-.DS_Store
-Thumbs.db
+# Docker
+.dockerignore
+dockerfile*
+docker-compose*.yml
 
-# Project specific
-results/
-output/
-separated/
-downloads/
-uploads/
-temp_audio/
-benchmark_output/
-*.wav
-*.mp3
-*.flac
-*.ogg
+# Scripts
+scripts/
 
-# Models (downloaded at runtime)
+# Monitoring configs (copié séparément si besoin)
+monitoring/
+
+# Models cache (géré par volumes)
 models/
 *.pth
 *.pt
-*.ckpt
 
-# Docker
-dockerfile
-docker-compose.yml
-.dockerignore
+# Temp files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Documentation
+README.md
+LICENSE
+*.md
 
 # CI/CD
+.github/
 .gitlab-ci.yml
-Jenkinsfile
 
-# Jupyter
-*.ipynb
-.ipynb_checkpoints/
-
-# Node (if any)
-node_modules/
-package-lock.json
-
-# Databases
-*.db
-*.sqlite
-*.sqlite3
+# MacOS
+.DS_Store
