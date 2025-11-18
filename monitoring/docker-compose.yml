@@ -7,6 +7,7 @@ services:
       context: ..
       dockerfile: dockerfile
     image: music-separator:latest
+    platform: linux/arm64
     container_name: music-separator-api
     ports:
       - "8000:8000"
@@ -46,6 +47,7 @@ services:
       context: ..
       dockerfile: dockerfile
     image: music-separator:latest
+    platform: linux/arm64
     container_name: music-separator-gradio
     ports:
       - "7860:7860"
@@ -110,8 +112,8 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ../grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ../grafana/datasources:/etc/grafana/provisioning/datasources
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
