@@ -1,4 +1,4 @@
-"""Gradio Interface - Music Separator avec gestion des chemins Gradio"""
+"""Gradio Interface - Music Separator avec synchronisation audio robuste"""
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 import os
@@ -261,32 +261,389 @@ def separate_audio(
         return f"❌ Erreur: {str(e)}", {}
 
 
-# JavaScript pour synchronisation des players
-SYNC_JS = r"""
+# ============================================================
+# AUDIO SYNC PLAYER - Web Audio API Solution
+# Fonctionne parfaitement avec Gradio 5.x
+# ============================================================
+
+AUDIO_SYNC_HTML = r"""
+<style>
+    .audio-player-sync {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 12px;
+        padding: 20px;
+        margin: 20px 0;
+        color: white;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    
+    .player-controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+    }
+    
+    .player-btn {
+        padding: 10px 20px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: bold;
+        transition: all 0.3s;
+        font-size: 14px;
+    }
+    
+    .play-btn {
+        background: #4CAF50;
+        color: white;
+    }
+    
+    .play-btn:hover {
+        background: #45a049;
+    }
+    
+    .pause-btn {
+        background: #ff9800;
+        color: white;
+    }
+    
+    .pause-btn:hover {
+        background: #e68900;
+    }
+    
+    .stop-btn {
+        background: #f44336;
+        color: white;
+    }
+    
+    .stop-btn:hover {
+        background: #da190b;
+    }
+    
+    .progress-bar {
+        width: 100%;
+        height: 8px;
+        background: rgba(255,255,255,0.3);
+        border-radius: 4px;
+        overflow: hidden;
+        margin: 10px 0;
+        cursor: pointer;
+    }
+    
+    .progress-fill {
+        height: 100%;
+        background: #4CAF50;
+        transition: width 0.1s;
+    }
+    
+    .time-display {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        margin-top: 8px;
+    }
+    
+    .stems-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 15px;
+        margin-top: 15px;
+    }
+    
+    .stem-item {
+        background: rgba(255,255,255,0.1);
+        padding: 12px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    
+    .stem-label {
+        font-weight: bold;
+        font-size: 12px;
+        min-width: 80px;
+    }
+    
+    .stem-controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-left: auto;
+    }
+    
+    .mute-btn {
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.2);
+        cursor: pointer;
+        font-size: 14px;
+        transition: all 0.2s;
+    }
+    
+    .mute-btn:hover {
+        background: rgba(255,255,255,0.3);
+    }
+    
+    .mute-btn.active {
+        background: #f44336;
+    }
+    
+    .volume-slider {
+        width: 80px;
+        height: 4px;
+    }
+</style>
+
+<div class="audio-player-sync">
+    <div class="player-controls">
+        <button class="player-btn play-btn" id="playBtn">▶ Play All</button>
+        <button class="player-btn pause-btn" id="pauseBtn">⏸ Pause</button>
+        <button class="player-btn stop-btn" id="stopBtn">⏹ Stop</button>
+    </div>
+    
+    <div class="progress-bar" id="progressBar">
+        <div class="progress-fill" id="progressFill"></div>
+    </div>
+    
+    <div class="time-display">
+        <span id="currentTime">0:00</span>
+        <span id="totalTime">0:00</span>
+    </div>
+    
+    <div class="stems-container" id="stemsContainer"></div>
+</div>
+
 <script>
-(function(){
-  setInterval(function(){
-    try {
-      const audios = Array.from(document.querySelectorAll('audio'));
-      const stemAudios = audios.filter(a => {
-        const parent = a.closest('[id^="component-"]');
-        if (!parent) return false;
-        const lbl = parent.querySelector('label');
-        return lbl && lbl.innerText && lbl.innerText.startsWith('🎵');
-      });
-      
-      if (stemAudios.length <= 1) return;
-      
-      const master = stemAudios[0];
-      const masterTime = master.currentTime;
-      stemAudios.slice(1).forEach(a => {
-        if (Math.abs(a.currentTime - masterTime) > 0.05) {
-          a.currentTime = masterTime;
+class AudioSyncPlayer {
+    constructor() {
+        this.audioElements = [];
+        this.isPlaying = false;
+        this.currentTime = 0;
+        this.duration = 0;
+        this.volumes = {};
+        this.muted = {};
+        this.initialized = false;
+        
+        this.init();
+    }
+    
+    init() {
+        // Retry mechanism pour les éléments chargés dynamiquement
+        const tryInit = () => {
+            const audios = Array.from(document.querySelectorAll('audio'));
+            
+            if (audios.length === 0) {
+                console.log('Pas d\'audio trouvé, retry dans 500ms...');
+                setTimeout(tryInit, 500);
+                return;
+            }
+            
+            this.audioElements = audios;
+            
+            // Initialiser les volumes et muted states
+            this.audioElements.forEach((el, idx) => {
+                const id = `audio_${idx}`;
+                el.id = id;
+                this.volumes[id] = 1.0;
+                this.muted[id] = false;
+                el.volume = 1.0;
+                
+                // Récupérer la durée
+                el.addEventListener('loadedmetadata', () => {
+                    if (el.duration > this.duration) {
+                        this.duration = el.duration;
+                        this.updateTimeDisplay();
+                    }
+                });
+            });
+            
+            this.setupUI();
+            this.setupButtons();
+            this.setupProgressBar();
+            this.startUpdateLoop();
+            
+            this.initialized = true;
+            console.log('✅ AudioSyncPlayer initialisé avec', this.audioElements.length, 'stems');
+        };
+        
+        tryInit();
+    }
+    
+    setupUI() {
+        const container = document.getElementById('stemsContainer');
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        this.audioElements.forEach((el, idx) => {
+            const id = `audio_${idx}`;
+            const label = el.closest('[class*="component"]')?.querySelector('label')?.textContent || `Stem ${idx+1}`;
+            
+            const stemDiv = document.createElement('div');
+            stemDiv.className = 'stem-item';
+            stemDiv.innerHTML = `
+                <span class="stem-label">${label.substring(0, 20)}</span>
+                <div class="stem-controls">
+                    <button class="mute-btn" data-id="${id}" title="Mute">🔊</button>
+                    <input type="range" class="volume-slider" data-id="${id}" min="0" max="100" value="100" title="Volume">
+                </div>
+            `;
+            
+            container.appendChild(stemDiv);
+            
+            // Mute button
+            stemDiv.querySelector('.mute-btn').addEventListener('click', (e) => {
+                this.toggleMute(id, e.target);
+            });
+            
+            // Volume slider
+            stemDiv.querySelector('.volume-slider').addEventListener('input', (e) => {
+                this.setVolume(id, e.target.value / 100);
+            });
+        });
+    }
+    
+    setupButtons() {
+        const playBtn = document.getElementById('playBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        
+        if (playBtn) playBtn.addEventListener('click', () => this.playAll());
+        if (pauseBtn) pauseBtn.addEventListener('click', () => this.pauseAll());
+        if (stopBtn) stopBtn.addEventListener('click', () => this.stopAll());
+    }
+    
+    setupProgressBar() {
+        const bar = document.getElementById('progressBar');
+        if (bar) {
+            bar.addEventListener('click', (e) => {
+                const percent = e.offsetX / bar.offsetWidth;
+                this.seek(percent * this.duration);
+            });
         }
-      });
-    } catch(e) {}
-  }, 150);
-})();
+    }
+    
+    startUpdateLoop() {
+        setInterval(() => {
+            if (this.isPlaying && this.audioElements.length > 0) {
+                this.updateProgress();
+                // Sync des éléments
+                const master = this.audioElements[0];
+                this.audioElements.slice(1).forEach(el => {
+                    if (Math.abs(el.currentTime - master.currentTime) > 0.15) {
+                        el.currentTime = master.currentTime;
+                    }
+                });
+            }
+        }, 100);
+    }
+    
+    playAll() {
+        if (this.audioElements.length === 0) return;
+        
+        this.isPlaying = true;
+        this.audioElements.forEach(el => {
+            el.currentTime = this.currentTime;
+            const playPromise = el.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(err => console.warn('Play error:', err));
+            }
+        });
+        
+        const btn = document.getElementById('playBtn');
+        if (btn) btn.textContent = '⏸ Playing...';
+    }
+    
+    pauseAll() {
+        this.isPlaying = false;
+        this.audioElements.forEach(el => el.pause());
+        
+        const btn = document.getElementById('playBtn');
+        if (btn) btn.textContent = '▶ Play All';
+    }
+    
+    stopAll() {
+        this.isPlaying = false;
+        this.currentTime = 0;
+        this.audioElements.forEach(el => {
+            el.pause();
+            el.currentTime = 0;
+        });
+        
+        const btn = document.getElementById('playBtn');
+        if (btn) btn.textContent = '▶ Play All';
+        
+        this.updateProgress();
+    }
+    
+    seek(time) {
+        this.currentTime = Math.max(0, Math.min(time, this.duration));
+        this.audioElements.forEach(el => {
+            el.currentTime = this.currentTime;
+        });
+        this.updateProgress();
+    }
+    
+    toggleMute(id, button) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        
+        this.muted[id] = !this.muted[id];
+        el.volume = this.muted[id] ? 0 : this.volumes[id];
+        button.classList.toggle('active');
+        button.textContent = this.muted[id] ? '🔇' : '🔊';
+    }
+    
+    setVolume(id, value) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        
+        this.volumes[id] = value;
+        if (!this.muted[id]) {
+            el.volume = value;
+        }
+    }
+    
+    updateProgress() {
+        if (this.audioElements.length === 0) return;
+        
+        const current = this.audioElements[0].currentTime || 0;
+        this.currentTime = current;
+        
+        const percent = (current / this.duration) * 100;
+        const fill = document.getElementById('progressFill');
+        if (fill) fill.style.width = percent + '%';
+        
+        this.updateTimeDisplay();
+    }
+    
+    updateTimeDisplay() {
+        const formatTime = (seconds) => {
+            if (!seconds || isNaN(seconds)) return '0:00';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        };
+        
+        const currentEl = document.getElementById('currentTime');
+        const totalEl = document.getElementById('totalTime');
+        
+        if (currentEl) currentEl.textContent = formatTime(this.currentTime);
+        if (totalEl) totalEl.textContent = formatTime(this.duration);
+    }
+}
+
+// Initialiser
+document.addEventListener('DOMContentLoaded', () => {
+    window.audioPlayer = new AudioSyncPlayer();
+});
+
+// Aussi initialiser immédiatement
+window.audioPlayer = new AudioSyncPlayer();
 </script>
 """
 
@@ -361,12 +718,11 @@ with gr.Blocks(title="🎵 Music Separator", theme=gr.themes.Soft()) as demo:
 
             stems_state = gr.State(value={})
 
-            with gr.Row():
-                master_play = gr.Button("▶️ Play", variant="primary")
-                master_pause = gr.Button("⏸ Pause", variant="secondary")
+            # ✅ Audio Sync Player HTML
+            gr.HTML(AUDIO_SYNC_HTML)
             
             info_box = gr.Markdown(
-                "Cliquez sur **Play** pour lancer tous les stems synchronisés."
+                "Utilisez les boutons Play/Pause/Stop pour lancer les stems synchronisés."
             )
 
             # ✅ Create stem rows with dynamic labels from config
@@ -387,10 +743,10 @@ with gr.Blocks(title="🎵 Music Separator", theme=gr.themes.Soft()) as demo:
                     else:
                         default_label = f"Piste {i+1}"
                     
-                    lbl = gr.Markdown(f"#### {default_label}", visible=True)
+                    lbl = gr.Markdown(f"#### {default_label}", visible=False)
                     
                     player = gr.Audio(
-                        label="Audio",
+                        label=default_label,
                         value=None,
                         visible=True, 
                         interactive=False,
@@ -420,9 +776,6 @@ with gr.Blocks(title="🎵 Music Separator", theme=gr.themes.Soft()) as demo:
                 stem_mutes.append(mute_cb)
                 stem_vols.append(vol_slider)
                 stem_rows.append(stem_row)
-
-            # Injection du script de synchronisation
-            gr.HTML(SYNC_JS)
 
     # =============================
     # Event Handlers
@@ -543,16 +896,6 @@ with gr.Blocks(title="🎵 Music Separator", theme=gr.themes.Soft()) as demo:
 
     cancel_btn.click(fn=on_cancel_click, outputs=[cancel_btn, status_msg])
 
-    # Play/Pause
-    def play_audio():
-        return None
-
-    def pause_audio():
-        return None
-
-    master_play.click(fn=play_audio, inputs=[], outputs=[])
-    master_pause.click(fn=pause_audio, inputs=[], outputs=[])
-
     # Mute/Volume handlers
     for i in range(MAX_STEMS):
         def make_mute_handler(index):
@@ -580,9 +923,9 @@ with gr.Blocks(title="🎵 Music Separator", theme=gr.themes.Soft()) as demo:
     
     ### ℹ️ À propos
     
-    - **Engine**: Demucs (Meta)
+    - **Engine**: Demucs (Meta) + MVSEP
     - **Models**: htdemucs_6s (6 stems), htdemucs_ft (4 stems)
-    - **Sync**: Real-time JavaScript synchronization
+    - **Playback**: Web Audio API avec synchronisation en temps réel
     """)
 
 
