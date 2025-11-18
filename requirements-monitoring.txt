@@ -1,0 +1,48 @@
+# Core API
+fastapi==0.115.2
+uvicorn[standard]==0.38.0
+python-multipart==0.0.18
+pydantic==2.9.2
+pydantic-settings==2.6.1
+
+# YouTube download
+yt-dlp==2025.11.12
+
+# Demucs / Torch
+demucs==4.0.1
+torch==2.9.1
+torchaudio==2.9.1
+
+# Audio processing
+numpy==2.1.2
+soundfile==0.12.1
+
+# Gradio interface
+gradio==5.49.1
+huggingface_hub==0.34.4
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# Testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# MVSEP models (audio-separator)
+audio-separator==0.39.1
+onnxruntime==1.23.1
+
+# ═══════════════════════════════════════════════════════════════
+# MONITORING DEPENDENCIES (NEW)
+# ═══════════════════════════════════════════════════════════════
+
+# Prometheus metrics
+prometheus-client==0.19.0
+
+# System monitoring
+psutil==5.9.6
+
+# Scipy for audio resampling (if needed)
+scipy==1.11.4
