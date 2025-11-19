@@ -103,6 +103,46 @@ services:
       - monitoring
 
   # ============================================================
+  # Redis (broker/backend for Celery)
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: music-separator-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ============================================================
+  # Celery worker
+  # ============================================================
+  celery_worker:
+    build:
+      context: ..
+      dockerfile: dockerfile
+    image: music-separator:latest
+    container_name: music-separator-celery
+    # Use python -m celery to avoid relying on the celery console script location
+    command: python -m celery -A src.celery_app worker --loglevel=info
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+      - DEVICE=cpu
+    volumes:
+      - ../src:/app/src
+      - models_cache:/root/.cache
+      - temp_audio:/tmp/music-separator
+    depends_on:
+      - redis
+      - api
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ============================================================
   # Grafana
   # ============================================================
   grafana:
@@ -199,6 +239,8 @@ volumes:
     name: music-separator-grafana
   alertmanager_data:
     name: music-separator-alertmanager
+  redis_data:
+    name: music-separator-redis
 
 # ============================================================
 # Networks

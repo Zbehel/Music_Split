@@ -4,7 +4,7 @@ from src.stems import STEM_CONFIGS, get_stems, get_num_stems
 import torch
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, cast
 import logging
 import soundfile as sf
 from demucs.pretrained import get_model
@@ -50,7 +50,7 @@ class MusicSeparator:
         self.model_config = self.AVAILABLE_MODELS[model_name]
         self.stems = get_stems(model_name)  # ✅ Get from shared config
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = None
+        self.model: Optional[Any] = None
         self.model_type = self.model_config["type"]
         
         logger.info(f"Init {model_name} sur {self.device}")
@@ -76,11 +76,17 @@ class MusicSeparator:
         # Convertir en torch tensor (channels, samples)
         wav = torch.from_numpy(audio_data.T).float()
         
+        # Ensure model is loaded and non-None for type checker
+        if self.model is None:
+            # Defensive: either load it or raise. Ici on préfère lever une erreur claire.
+            raise RuntimeError("Model not loaded. Call _load_model() or use separate() which loads model.")
+        model = self.model  # type: ignore[assignment]
+        
         # Resample si nécessaire
-        if sr != self.model.samplerate:
+        if sr != model.samplerate:
             # Resample simple sans torchaudio
             import scipy.signal
-            num_samples = int(wav.shape[1] * self.model.samplerate / sr)
+            num_samples = int(wav.shape[1] * model.samplerate / sr)
             wav_resampled = []
             for channel in wav:
                 resampled = scipy.signal.resample(channel.numpy(), num_samples)
@@ -96,7 +102,7 @@ class MusicSeparator:
         
         # Séparer
         with torch.no_grad():
-            sources = apply_model(self.model, wav, device=self.device, progress=True)
+            sources = apply_model(model, wav, device=self.device, progress=True)
         
         sources = sources[0]  # Enlever batch
         results = {}
@@ -123,6 +129,9 @@ class MusicSeparator:
     
     @classmethod
     def get_model_info(cls, name): 
+        """Get model information safely"""
+        if name not in cls.AVAILABLE_MODELS:
+            raise ValueError(f"Model '{name}' not found")
         return cls.AVAILABLE_MODELS[name]
 
 

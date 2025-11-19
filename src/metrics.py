@@ -171,6 +171,31 @@ temp_storage_bytes = Gauge(
     'Total size of temporary storage in bytes'
 )
 
+
+# ============================================================
+# QUEUE / WORKER METRICS
+# ============================================================
+
+running_jobs = Gauge(
+    'music_running_jobs',
+    'Number of running separation jobs'
+)
+
+pending_jobs = Gauge(
+    'music_pending_jobs',
+    'Number of pending jobs in the queue'
+)
+
+process_pool_busy = Gauge(
+    'process_pool_busy',
+    'Number of busy workers in the local process pool'
+)
+
+process_pool_workers = Gauge(
+    'process_pool_workers',
+    'Configured max workers for the local process pool'
+)
+
 # ============================================================
 # DECORATORS
 # ============================================================

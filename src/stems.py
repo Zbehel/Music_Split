@@ -43,7 +43,6 @@ def get_num_stems(model_name: str) -> int:
     """Get number of stems for model"""
     return len(STEM_CONFIGS[model_name]["stems"])
 
-
 def get_max_stems() -> int:
     """Get maximum stems across all models."""
     return max(len(config["stems"]) for config in STEM_CONFIGS.values())

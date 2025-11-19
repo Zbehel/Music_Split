@@ -1,0 +1,186 @@
+═══════════════════════════════════════════════════════════════
+  🚀 MINIKUBE - QUICK START
+═══════════════════════════════════════════════════════════════
+
+📋 PRÉREQUIS
+───────────────────────────────────────────────────────────────
+✅ Docker Desktop installé et démarré
+✅ Homebrew installé (pour macOS)
+✅ 8+ GB RAM libre
+✅ 20+ GB disk libre
+
+⚡ SETUP AUTOMATIQUE (5 MINUTES)
+───────────────────────────────────────────────────────────────
+
+1. Rendre le script exécutable:
+   chmod +x setup-minikube.sh
+
+2. Lancer le setup:
+   ./setup-minikube.sh
+
+3. Suivre les instructions à l'écran
+
+Le script fait TOUT automatiquement:
+  ✅ Installe kubectl si manquant
+  ✅ Installe minikube si manquant
+  ✅ Démarre Minikube (4 CPU, 8GB RAM)
+  ✅ Build l'image Docker
+  ✅ Charge l'image dans Minikube
+  ✅ Déploie sur Kubernetes
+  ✅ Vérifie que tout fonctionne
+
+🎯 ACCÈS À L'APPLICATION
+───────────────────────────────────────────────────────────────
+
+Le script propose de lancer automatiquement le port-forward.
+
+OU manuellement dans un nouveau terminal:
+
+  kubectl port-forward -n music-separation \
+    svc/music-separator-service 8000:80
+
+Puis visiter:
+  http://localhost:8000/docs      → Swagger UI
+  http://localhost:8000/health    → Health check
+  http://localhost:8000/models    → Liste modèles
+
+📊 VÉRIFICATIONS RAPIDES
+───────────────────────────────────────────────────────────────
+
+# Voir les pods
+kubectl get pods -n music-separation
+
+# Voir les logs
+kubectl logs -f -n music-separation -l app=music-separator
+
+# Status Minikube
+minikube status
+
+# Dashboard (optionnel)
+minikube dashboard
+
+🧪 TEST RAPIDE
+───────────────────────────────────────────────────────────────
+
+# Health check
+curl http://localhost:8000/health
+
+# Liste des modèles
+curl http://localhost:8000/models
+
+# Interface Swagger
+open http://localhost:8000/docs
+
+🧹 CLEANUP
+───────────────────────────────────────────────────────────────
+
+# Script interactif
+./cleanup-minikube.sh
+
+# OU manuellement:
+
+# Supprimer le namespace
+kubectl delete namespace music-separation
+
+# Arrêter Minikube
+minikube stop
+
+# Supprimer Minikube
+minikube delete
+
+🐛 PROBLÈMES COURANTS
+───────────────────────────────────────────────────────────────
+
+Problème: "Cannot connect to Docker daemon"
+Solution: Démarrer Docker Desktop
+
+Problème: "Insufficient memory"
+Solution: Augmenter RAM dans Docker Desktop → Settings
+
+Problème: "Image not found"
+Solution: 
+  docker build -t music-separator:v2.0 .
+  minikube image load music-separator:v2.0
+  kubectl rollout restart deployment/music-separator -n music-separation
+
+Problème: "Pod CrashLoopBackOff"
+Solution: Voir les logs
+  kubectl logs <pod-name> -n music-separation
+  kubectl describe pod <pod-name> -n music-separation
+
+🔄 RECOMMENCER FROM SCRATCH
+───────────────────────────────────────────────────────────────
+
+# Si tout est cassé
+minikube delete
+rm -rf ~/.minikube
+./setup-minikube.sh
+
+📚 DOCUMENTATION COMPLÈTE
+───────────────────────────────────────────────────────────────
+
+MINIKUBE-README.md     → Guide complet avec toutes les commandes
+docs/KUBERNETES.md     → Guide Kubernetes général
+
+🎓 COMMANDES UTILES
+───────────────────────────────────────────────────────────────
+
+# Pods
+kubectl get pods -n music-separation
+kubectl logs -f <pod-name> -n music-separation
+kubectl describe pod <pod-name> -n music-separation
+kubectl exec -it <pod-name> -n music-separation -- /bin/bash
+
+# Services
+kubectl get services -n music-separation
+kubectl describe service music-separator-service -n music-separation
+
+# Deployments
+kubectl get deployments -n music-separation
+kubectl rollout status deployment/music-separator -n music-separation
+kubectl rollout restart deployment/music-separator -n music-separation
+kubectl scale deployment/music-separator --replicas=3 -n music-separation
+
+# Minikube
+minikube status
+minikube dashboard
+minikube ssh
+minikube logs
+
+# Métriques
+kubectl top nodes
+kubectl top pods -n music-separation
+
+📊 ARCHITECTURE DÉPLOYÉE
+───────────────────────────────────────────────────────────────
+
+Minikube Cluster
+├─ music-separation (namespace)
+│  ├─ 2 pods (music-separator)
+│  │  └─ Docker → Uvicorn → FastAPI → Demucs
+│  ├─ 1 service (LoadBalancer port 80 → 8000)
+│  └─ 1 HPA (2-10 replicas, CPU 70%)
+
+✅ RÉSULTAT ATTENDU
+───────────────────────────────────────────────────────────────
+
+Après ./setup-minikube.sh:
+
+  ✅ Minikube running
+  ✅ 2 pods running dans music-separation
+  ✅ Service exposé sur port 80
+  ✅ API accessible via port-forward sur localhost:8000
+  ✅ Swagger UI disponible
+  ✅ Infrastructure K8s complète fonctionnelle
+
+Temps total: 5-10 minutes
+Coût: $0 (tout local)
+
+🎉 C'EST PRÊT !
+───────────────────────────────────────────────────────────────
+
+Lancer: ./setup-minikube.sh
+
+═══════════════════════════════════════════════════════════════
+Version: 1.0 | Date: 2024-11-15 | Status: ✅ Ready
+═══════════════════════════════════════════════════════════════

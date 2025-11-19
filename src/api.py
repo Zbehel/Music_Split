@@ -8,12 +8,60 @@ from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from typing import Dict, Optional
+import uuid
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import asynccontextmanager
+from typing import Dict, Optional, Any
+try:
+    import redis
+except Exception:
+    redis = None
+try:
+    from opentelemetry import trace as otel_trace
+except Exception:
+    otel_trace = None
+import soundfile as sf
 import tempfile
 import shutil
 import time
 from datetime import datetime
-import asyncio
+import threading
+import os
+from contextlib import contextmanager  # kept for potential future use (no pika import)
+
+
+# Background metrics updater
+_metrics_stop_event = threading.Event()
+_metrics_thread: Optional[threading.Thread] = None
+_METRICS_INTERVAL = int(os.environ.get("METRICS_PUBLISH_INTERVAL", "15"))
+
+# Job management (in-memory). For higher scale, persist to Redis/DB.
+JOBS: Dict[str, Dict] = {}
+# Process pool for CPU-bound separation tasks — created at lifespan startup
+_process_pool: Optional[ProcessPoolExecutor] = None
+_PROCESS_POOL_MAX_WORKERS = int(os.environ.get("PROCESS_POOL_WORKERS", "2"))
+
+# Redis / Celery config
+REDIS_URL = os.environ.get("REDIS_URL", None)
+MAX_PENDING = int(os.environ.get("MAX_PENDING", "4"))
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "100"))
+MAX_DURATION_SECONDS = int(os.environ.get("MAX_DURATION_SECONDS", "600"))
+
+_redis_client: Optional[Any] = None
+USE_CELERY = False
+if REDIS_URL and redis is not None:
+    try:
+        tmp_redis = redis.from_url(REDIS_URL)
+        # quick ping
+        tmp_redis.ping()
+        _redis_client = tmp_redis
+        USE_CELERY = True
+    except Exception:
+        USE_CELERY = False
+else:
+    USE_CELERY = False
+
 
 # ✅ Import stems config
 from src.stems import STEM_CONFIGS
@@ -33,6 +81,13 @@ from src.metrics import (
     get_metrics,
     get_metrics_content_type
 )
+from src.metrics import (
+    running_jobs,
+    pending_jobs,
+    process_pool_busy,
+    process_pool_workers,
+    active_sessions,
+)
 from src.logging_config import (
     setup_logging,
     get_logger,
@@ -48,6 +103,24 @@ from src.resilience import (
     RateLimitExceeded,
     RetryExhausted
 )
+
+if USE_CELERY:
+    try:
+        from src.celery_app import celery  # noqa: F401
+        from src.tasks import separate_task  # noqa: F401
+    except Exception:
+        USE_CELERY = False
+
+
+def _worker_separate(model_name: str, input_path: str, output_dir: str) -> Dict[str, str]:
+    """Worker function executed in a separate process to load model and run separation.
+    Must be top-level so it is picklable for ProcessPoolExecutor.
+    """
+    # Import inside worker process to avoid issues with pickling model objects
+    from src.separator import MusicSeparator
+
+    separator = MusicSeparator(model_name=model_name)
+    return separator.separate(str(input_path), str(output_dir))
 
 # ✅ Setup structured logging
 setup_logging(level="INFO", json_format=True)
@@ -93,14 +166,35 @@ TEMP_DIR.mkdir(exist_ok=True)
 async def metrics_middleware(request: Request, call_next):
     """Middleware to track all HTTP requests with metrics"""
     start_time = time.time()
-    
-    # Generate request ID
-    request_id = f"{datetime.now().timestamp()}-{id(request)}"
-    
+
+    # Respect incoming X-Request-ID if present (propagate), otherwise generate
+    incoming_req_id = request.headers.get("x-request-id") or request.headers.get("X-Request-ID")
+    request_id = incoming_req_id if incoming_req_id else uuid.uuid4().hex
+
+    # Try to extract trace_id from OpenTelemetry if available
+    trace_id = None
+    try:
+        if otel_trace is not None:
+            span = otel_trace.get_current_span()
+            if span is not None:
+                ctx = span.get_span_context()
+                if ctx is not None and getattr(ctx, "trace_id", 0):
+                    trace_id = f"{ctx.trace_id:032x}"
+    except Exception:
+        trace_id = None
+
+    # Attach ids to request.state for handlers
+    request.state.request_id = request_id
+    request.state.trace_id = trace_id
+
     # Create logger with context
-    request_logger = get_logger(__name__, {"request_id": request_id})
+    ctx = {"request_id": request_id}
+    if trace_id:
+        ctx["trace_id"] = trace_id
+    request_logger = get_logger(__name__, ctx)
 
     status: int = 500  # Default status
+    response = None
     try:
         response = await call_next(request)
         status = response.status_code
@@ -132,47 +226,20 @@ async def metrics_middleware(request: Request, call_next):
             duration=duration,
             client_ip=request.client.host if request.client else "unknown"
         )
-    
+        # Ensure request id is propagated back in response headers
+        try:
+            if response is not None:
+                response.headers.setdefault("X-Request-ID", request_id)
+                if trace_id:
+                    response.headers.setdefault("X-Trace-ID", trace_id)
+        except Exception:
+            # ignore header failures
+            pass
+
     return response
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Run on application startup"""
-    logger.info("🚀 Music Separator API starting up")
-    
-    # Start background task to update system metrics
-    asyncio.create_task(update_metrics_periodically())
-    
-    logger.info(f"Device: {get_best_device()}")
-    logger.info(f"Available models: {list(STEM_CONFIGS.keys())}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Run on application shutdown"""
-    logger.info("🛑 Music Separator API shutting down")
-    
-    # Clear model cache
-    clear_cache()
-
-
-async def update_metrics_periodically():
-    """Background task to update system metrics every 15 seconds"""
-    while True:
-        try:
-            update_system_metrics()
-            update_temp_storage_metrics(str(TEMP_DIR))
-        except Exception as e:
-            logger.error(f"Error updating metrics: {e}")
-        
-        await asyncio.sleep(15)
-
-
-# ============================================================
-# ENDPOINTS
-# ============================================================
-
+# Créer l'application FastAPI 
 @app.get("/")
 def root():
     """Page d'accueil"""
@@ -312,7 +379,7 @@ async def separate_audio(
     )
 
     # ✅ Check model exists
-    if demucs_model not in STEM_CONFIGS:
+    if demucs_model not in STEM_CONFIGS.keys():
         available = list(STEM_CONFIGS.keys())
         errors_total.labels(
             type="InvalidModel",
@@ -323,140 +390,205 @@ async def separate_audio(
             detail=f"Modèle '{demucs_model}' non disponible. "
                    f"Modèles disponibles: {available}"
         )
+    # Respect circuit breaker state: reject new jobs if open
+    if getattr(model_circuit_breaker, "state", None) == "open":
+        logger.error("Circuit breaker open - rejecting new separation requests")
+        raise HTTPException(status_code=503, detail="Model service temporarily unavailable. Try again later.")
     
     # Créer un dossier temporaire unique
     temp_session = tempfile.mkdtemp(dir=TEMP_DIR)
     temp_path = Path(temp_session)
-    
+
     try:
-        # Sauvegarder le fichier uploadé
+        # Sauvegarder le fichier uploadé sur disque sans tout charger en mémoire
         input_file = temp_path / "input.wav"
-        file_size = 0
-        
-        with input_file.open("wb") as f:
-            content = await file.read()
-            file_size = len(content)
-            f.write(content)
-        
+
+        def _save_upload_sync(upload: UploadFile, dest_path: str) -> int:
+            upload.file.seek(0)
+            with open(dest_path, "wb") as dest:
+                shutil.copyfileobj(upload.file, dest)
+            return os.path.getsize(dest_path)
+
+        loop = asyncio.get_running_loop()
+        try:
+            file_size = await loop.run_in_executor(None, _save_upload_sync, file, str(input_file))
+        except Exception as e:
+            logger.error("Failed to save upload", extra={"error": str(e)})
+            raise HTTPException(status_code=500, detail="Failed to save uploaded file")
+
         # Track file size
         separation_file_size_bytes.observe(file_size)
-        
+
         logger.info(
             f"File saved",
-            extra={
-                "file_path": str(input_file),
-                "file_size_bytes": file_size,
-                "session_id": temp_path.name
-            }
+            extra={"file_path": str(input_file), "file_size_bytes": file_size, "session_id": temp_path.name}
         )
-        
+
         # Créer le dossier de sortie
         output_dir = temp_path / "output"
         output_dir.mkdir(exist_ok=True)
-        
-        # ✅ Get separator with circuit breaker
+
+        # Validate file duration (avoid huge jobs)
         try:
-            @model_circuit_breaker.call
-            def get_separator_safe():
-                return get_separator(demucs_model)
+            info = sf.info(str(input_file))
+            duration_seconds = float(info.frames) / float(info.samplerate)
+        except Exception:
+            duration_seconds = None
 
-            separator = get_separator_safe()
-        except CircuitBreakerOpen:
-            logger.error("Circuit breaker open for model loading")
-            raise HTTPException(
-                status_code=503,
-                detail="Model service temporarily unavailable. Try again later."
-            )
+        if duration_seconds is not None and duration_seconds > MAX_DURATION_SECONDS:
+            shutil.rmtree(temp_path, ignore_errors=True)
+            raise HTTPException(status_code=413, detail=f"Audio duration {duration_seconds:.0f}s exceeds maximum allowed {MAX_DURATION_SECONDS}s")
 
-        # ✅ Separate audio with retry
-        separation_start = time.time()
+        # Validate file size
+        max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        if file_size > max_bytes:
+            shutil.rmtree(temp_path, ignore_errors=True)
+            raise HTTPException(status_code=413, detail=f"File size {file_size} bytes exceeds maximum allowed {max_bytes} bytes")
 
-        @retry(max_attempts=2, delay=1.0, exceptions=(Exception,))
-        def separate_with_retry() -> Dict[str, str]:
-            return separator.separate(str(input_file), str(output_dir))
+        now_ts = time.time()
 
-        try:
-            results = separate_with_retry()
-            if results is None:
-                raise HTTPException(status_code=500, detail="Separation returned no results")
-        except RetryExhausted as e:
-            logger.error(f"Separation failed after retries: {e}")
-            separations_total.labels(
-                model=demucs_model,
-                status="error"
-            ).inc()
-            raise HTTPException(status_code=500, detail="Separation failed after retries")
+        # If using Celery+Redis, enforce MAX_PENDING via Redis counter
+        if USE_CELERY and _redis_client is not None:
+            counter_key = "music_separator:running"
+            try:
+                current_running = int(_redis_client.get(counter_key) or 0)
+            except Exception:
+                current_running = 0
 
-        separation_duration = time.time() - separation_start
-        stems_count = len(results)
+            if current_running >= MAX_PENDING:
+                shutil.rmtree(temp_path, ignore_errors=True)
+                raise HTTPException(status_code=429, detail="System busy, try again later")
 
-        # ✅ Update metrics
-        separations_total.labels(
-            model=demucs_model,
-            status="success"
-        ).inc()
+            # Submit to Celery
+            try:
+                from src.celery_app import celery
 
-        separation_duration_seconds.labels(
-            model=demucs_model
-        ).observe(separation_duration)
+                # Increment pending_jobs gauge to reflect queued task
+                try:
+                    pending_jobs.inc()
+                except Exception:
+                    pass
 
-        # ✅ Structured logging
-        log_separation(
-            logger,
-            model=demucs_model,
-            audio_duration=0,  # Could calculate from file if needed
-            processing_duration=separation_duration,
-            status="success",
-            session_id=temp_path.name,
-            stems_count=stems_count,
-            file_size_bytes=file_size
-        )
+                async_result = celery.send_task("src.tasks.separate_task", args=[demucs_model, str(input_file), str(output_dir)])
+                job_id = async_result.id
+                JOBS[job_id] = {
+                    "status": "pending",
+                    "model": demucs_model,
+                    "session_id": temp_path.name,
+                    "submitted_at": now_ts,
+                    "started_at": None,
+                    "finished_at": None,
+                    "result": None,
+                    "error": None,
+                    "file_size": file_size,
+                    "output_dir": str(output_dir),
+                    "celery_id": async_result.id,
+                }
 
-        logger.info(
-            f"Separation completed",
-            extra={
-                "model": demucs_model,
-                "stems_count": stems_count,
-                "duration_seconds": separation_duration,
-                "session_id": temp_path.name
-            }
-        )
+                return {
+                    "status": "accepted",
+                    "job_id": job_id,
+                    "session_id": temp_path.name,
+                    "status_url": f"/status/{job_id}",
+                    "download_template": f"/download/status/{job_id}/{{stem_name}}"
+                }
+            except Exception as e:
+                logger.error(f"Failed to submit Celery task: {e}")
+                shutil.rmtree(temp_path, ignore_errors=True)
+                raise HTTPException(status_code=500, detail="Failed to schedule job")
 
-        # Retourner les chemins des fichiers
-        return {
-            "status": "success",
-            "model_used": demucs_model,
-            "stems_count": stems_count,
-            "stems": results,
+        # Fallback: submit to local process pool
+        if _process_pool is None:
+            logger.error("Process pool not available")
+            raise HTTPException(status_code=503, detail="Processing back-end not available")
+
+        job_id = uuid.uuid4().hex
+        JOBS[job_id] = {
+            "status": "pending",
+            "model": demucs_model,
             "session_id": temp_path.name,
-            "processing_time_seconds": separation_duration
+            "submitted_at": now_ts,
+            "started_at": None,
+            "finished_at": None,
+            "result": None,
+            "error": None,
+            "file_size": file_size,
+            "output_dir": str(output_dir)
         }
-        
+
+        # Submit the worker to process pool
+        def _on_done(fut, job_id=job_id, model=demucs_model):
+            JOBS[job_id]["finished_at"] = time.time()
+            try:
+                res = fut.result()
+                JOBS[job_id]["status"] = "done"
+                JOBS[job_id]["result"] = res
+
+                # Update metrics
+                separations_total.labels(model=model, status="success").inc()
+                duration = JOBS[job_id]["finished_at"] - (JOBS[job_id]["started_at"] or JOBS[job_id]["submitted_at"])
+                try:
+                    separation_duration_seconds.labels(model=model).observe(duration)
+                except Exception:
+                    logger.debug("Could not observe separation duration metric")
+
+                # Log
+                log_separation(
+                    logger,
+                    model=model,
+                    audio_duration=duration,
+                    processing_duration=duration,
+                    status="success",
+                    session_id=JOBS[job_id]["session_id"],
+                    stems_count=len(res) if res else 0,
+                    file_size_bytes=JOBS[job_id]["file_size"]
+                )
+            except Exception as e:
+                JOBS[job_id]["status"] = "error"
+                JOBS[job_id]["error"] = str(e)
+                separations_total.labels(model=model, status="error").inc()
+                errors_total.labels(type=type(e).__name__, endpoint="/separate").inc()
+                logger.error("Job failed", extra={"job_id": job_id, "error": str(e)}, exc_info=True)
+            finally:
+                # Update process-pool metrics to reflect job completion
+                try:
+                    process_pool_busy.dec()
+                except Exception:
+                    pass
+                try:
+                    running_jobs.dec()
+                except Exception:
+                    pass
+
+        # mark started and submit
+        JOBS[job_id]["status"] = "running"
+        JOBS[job_id]["started_at"] = time.time()
+        # Update local process-pool metrics
+        try:
+            process_pool_busy.inc()
+        except Exception:
+            pass
+        try:
+            running_jobs.inc()
+        except Exception:
+            pass
+        future = _process_pool.submit(_worker_separate, demucs_model, str(input_file), str(output_dir))
+        JOBS[job_id]["future"] = future
+        future.add_done_callback(_on_done)
+
+        # Return job id and quick links
+        return {
+            "status": "accepted",
+            "job_id": job_id,
+            "session_id": temp_path.name,
+            "status_url": f"/status/{job_id}",
+            "download_template": f"/download/status/{job_id}/{{stem_name}}"
+        }
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(
-            f"Error during separation",
-            extra={
-                "model": demucs_model,
-                "error": str(e),
-                "session_id": temp_path.name
-            },
-            exc_info=True
-        )
-
-        # Update error metrics
-        errors_total.labels(
-            type=type(e).__name__,
-            endpoint="/separate"
-        ).inc()
-
-        separations_total.labels(
-            model=demucs_model,
-            status="error"
-        ).inc()
-        
-        # Nettoyer en cas d'erreur
+        logger.error(f"Error scheduling separation job: {e}", exc_info=True)
         shutil.rmtree(temp_path, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -488,6 +620,79 @@ def download_stem(session_id: str, stem_name: str):
         media_type="audio/wav",
         filename=f"{stem_name}.wav"
     )
+
+
+@app.get("/status/{job_id}")
+def get_job_status(job_id: str):
+    """Retourne l'état d'un job de séparation"""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # If Celery used, prefer AsyncResult state
+    resp = {k: v for k, v in job.items() if k != "future"}
+    if USE_CELERY and job.get("celery_id"):
+        try:
+            from src.celery_app import celery
+
+            async_res = celery.AsyncResult(job.get("celery_id"))
+            state = async_res.state
+            if state == "PENDING":
+                resp["status"] = "pending"
+            elif state in ("STARTED", "RETRY"):
+                resp["status"] = "running"
+            elif state == "SUCCESS":
+                resp["status"] = "done"
+                try:
+                    resp["result"] = async_res.result
+                except Exception:
+                    resp["result"] = None
+            elif state == "FAILURE":
+                resp["status"] = "error"
+                try:
+                    resp["error"] = str(async_res.result)
+                except Exception:
+                    resp["error"] = "task failure"
+            else:
+                resp["status"] = state.lower()
+        except Exception:
+            resp["status"] = job.get("status")
+
+    return resp
+
+
+@app.get("/download/status/{job_id}/{stem_name}")
+def download_by_job(job_id: str, stem_name: str):
+    """Télécharge un stem pour un job donné (nouvel endpoint compatible)."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # For Celery-backed jobs, consult task state
+    if USE_CELERY and job.get("celery_id"):
+        try:
+            from src.celery_app import celery
+            async_res = celery.AsyncResult(job.get("celery_id"))
+            if async_res.state != "SUCCESS":
+                raise HTTPException(status_code=409, detail=f"Job not finished (state={async_res.state})")
+        except HTTPException:
+            raise
+        except Exception:
+            # if we cannot query celery, fall back to stored status
+            if job.get("status") != "done":
+                raise HTTPException(status_code=409, detail=f"Job not finished (status={job.get('status')})")
+    else:
+        if job.get("status") != "done":
+            raise HTTPException(status_code=409, detail=f"Job not finished (status={job.get('status')})")
+
+    output_dir = job.get("output_dir")
+    if not output_dir:
+        raise HTTPException(status_code=500, detail="Job has no output directory")
+
+    file_path = Path(output_dir) / f"{stem_name}.wav"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Stem not found for job")
+
+    return FileResponse(path=str(file_path), media_type="audio/wav", filename=f"{stem_name}.wav")
 
 
 @app.post("/clear-cache")
@@ -543,6 +748,92 @@ def cleanup_all():
         "message": f"Cleaned {count} sessions",
         "sessions_removed": count
     }
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan manager to initialize process pool and background metrics thread.
+    Replaces deprecated @app.on_event startup/shutdown.
+    """
+    logger.info("Music Separator API starting up (lifespan)")
+
+    # Clear old temp files
+    try:
+        for item in TEMP_DIR.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+    except Exception as e:
+        logger.error(f"Error cleaning temp dir on startup: {e}")
+
+    logger.info(f"Device: {get_best_device()}")
+    logger.info(f"Available models: {list(STEM_CONFIGS.keys())}")
+
+    # Initial update of models_loaded metric (0 or currently loaded)
+    try:
+        loaded = list(get_separator.__globals__.get('_loaded_models', {}).keys())
+        models_loaded.set(len(loaded))
+    except Exception:
+        logger.debug("Could not set initial models_loaded metric")
+
+    # Start background thread to periodically refresh system/temp metrics and models_loaded
+    global _metrics_thread, _metrics_stop_event, _process_pool
+    _metrics_stop_event.clear()
+
+    def _metrics_updater_loop():
+        logger.info("Metrics updater thread started")
+        while not _metrics_stop_event.is_set():
+            try:
+                update_system_metrics()
+                update_temp_storage_metrics(str(TEMP_DIR))
+                try:
+                    loaded = list(get_separator.__globals__.get('_loaded_models', {}).keys())
+                    models_loaded.set(len(loaded))
+                except Exception:
+                    logger.debug("Could not update models_loaded in metrics loop")
+            except Exception as e:
+                logger.error(f"Error updating metrics in background thread: {e}")
+            _metrics_stop_event.wait(_METRICS_INTERVAL)
+        logger.info("Metrics updater thread stopped")
+
+    if _metrics_thread is None or not _metrics_thread.is_alive():
+        _metrics_thread = threading.Thread(target=_metrics_updater_loop, name="metrics_updater", daemon=True)
+        _metrics_thread.start()
+
+    # Create process pool for CPU-bound separation tasks
+    try:
+        _process_pool = ProcessPoolExecutor(max_workers=_PROCESS_POOL_MAX_WORKERS)
+        logger.info(f"ProcessPoolExecutor started with {_PROCESS_POOL_MAX_WORKERS} workers")
+        try:
+            process_pool_workers.set(_PROCESS_POOL_MAX_WORKERS)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Could not start process pool: {e}")
+        _process_pool = None
+
+    try:
+        yield
+    finally:
+        logger.info("Music Separator API shutting down (lifespan)")
+        # Stop metrics thread
+        try:
+            _metrics_stop_event.set()
+            if _metrics_thread is not None:
+                _metrics_thread.join(timeout=5)
+        except Exception as e:
+            logger.error(f"Error stopping metrics thread: {e}")
+
+        # Shutdown process pool
+        try:
+            if _process_pool is not None:
+                _process_pool.shutdown(wait=True)
+                logger.info("Process pool shut down")
+        except Exception as e:
+            logger.error(f"Error shutting down process pool: {e}")
+
+
+# Attach lifespan to app
+app.router.lifespan_context = lifespan
 
 
 if __name__ == "__main__":
