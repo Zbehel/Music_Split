@@ -8,7 +8,6 @@ import time
 from typing import Callable, Any, Optional, Dict
 from functools import wraps
 from collections import defaultdict
-from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
@@ -125,9 +124,9 @@ class CircuitBreaker:
     
     def __init__(
         self,
-        failure_threshold: int = 5,
+        failure_threshold: int = 3,
         timeout: float = 60.0,
-        expected_exception: type = Exception
+        expected_exception = (Exception,),
     ):
         """
         Args:
@@ -297,3 +296,41 @@ class RateLimiter:
     def reset(self, key: str = "default"):
         """Reset rate limit for key"""
         self.requests[key] = []
+
+
+# ============================================================
+# TIMEOUT DECORATOR
+# ============================================================
+
+def timeout(seconds: float):
+    """Decorator to add a timeout to sync or async functions.
+
+    - Async functions use `asyncio.wait_for`.
+    - Sync functions are executed in a thread pool with `future.result(timeout=...)`.
+    On timeout, raises the built-in `TimeoutError`.
+    """
+    def decorator(func: Callable):
+        if asyncio.iscoroutinefunction(func):
+            @wraps(func)
+            async def _async_wrapper(*args, **kwargs):
+                try:
+                    return await asyncio.wait_for(func(*args, **kwargs), timeout=seconds)
+                except asyncio.TimeoutError:
+                    raise TimeoutError(f"Function '{func.__name__}' timed out after {seconds} seconds")
+
+            return _async_wrapper
+        else:
+            @wraps(func)
+            def _sync_wrapper(*args, **kwargs):
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(func, *args, **kwargs)
+                    try:
+                        return future.result(timeout=seconds)
+                    except concurrent.futures.TimeoutError:
+                        raise TimeoutError(f"Function '{func.__name__}' timed out after {seconds} seconds")
+
+            return _sync_wrapper
+
+    return decorator

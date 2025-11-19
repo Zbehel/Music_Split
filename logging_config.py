@@ -8,8 +8,37 @@ import json
 import sys
 from datetime import datetime
 from typing import Any, Dict
+from typing import Optional, Iterable, MutableMapping
+
+
+def sanitize_extra(extra: Dict[str, Any], redact_keys: Iterable[str] = ("password", "token", "api_key", "secret")) -> Dict[str, Any]:
+    """Sanitize extra dict for logging: redact sensitive keys, truncate long strings and replace binary data."""
+    def _sanitize(value, depth=0):
+        if depth > 5:
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                k: ("[REDACTED]" if any(r in k.lower() for r in redact_keys) else _sanitize(v, depth + 1))
+                for k, v in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            seq = [_sanitize(v, depth + 1) for v in value]
+            return type(value)(seq) if not isinstance(value, tuple) else tuple(seq)
+        if isinstance(value, (bytes, bytearray)):
+            return "[binary_data]"
+        if isinstance(value, str):
+            if len(value) > 200:
+                return value[:200] + "...[truncated]"
+            return value
+        return value
+
+    try:
+        return {k: _sanitize(v) for k, v in extra.items()}
+    except Exception:
+        return {"_sanitization_error": True}
 from pathlib import Path
 import traceback
+import uuid
 
 
 class StructuredFormatter(logging.Formatter):
@@ -30,19 +59,39 @@ class StructuredFormatter(logging.Formatter):
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
+            # Correlation ids (if provided via extra/ContextLogger)
+            "request_id": None,
+            "trace_id": None,
         }
         
         # Add exception info if present
         if record.exc_info:
+            try:
+                exc_type = record.exc_info[0]
+                exc_name = getattr(exc_type, "__name__", str(exc_type)) if exc_type is not None else None
+                exc_msg = str(record.exc_info[1]) if len(record.exc_info) > 1 else None
+                exc_tb = traceback.format_exception(*record.exc_info)
+            except Exception:
+                exc_name = None
+                exc_msg = None
+                exc_tb = None
+
             log_data["exception"] = {
-                "type": record.exc_info[0].__name__,
-                "message": str(record.exc_info[1]),
-                "traceback": traceback.format_exception(*record.exc_info)
+                "type": exc_name,
+                "message": exc_msg,
+                "traceback": exc_tb,
             }
         
-        # Add extra fields if present
-        if hasattr(record, "extra_data"):
-            log_data.update(record.extra_data)
+        # Add extra fields if present (sanitized)
+        record_extra = getattr(record, "extra_data", None)
+        if record_extra is not None:
+            extra = sanitize_extra(record_extra)
+            # Pull request/trace ids to top-level fields if present
+            if extra.get("request_id"):
+                log_data["request_id"] = extra.pop("request_id")
+            if extra.get("trace_id"):
+                log_data["trace_id"] = extra.pop("trace_id")
+            log_data.update(extra)
         
         # Add custom attributes (set by LoggerAdapter)
         for key in dir(record):
@@ -65,13 +114,13 @@ class ContextLogger(logging.LoggerAdapter):
     Usage: logger = ContextLogger(base_logger, {"request_id": "123"})
     """
     
-    def __init__(self, logger: logging.Logger, extra: Dict[str, Any] = None):
+    def __init__(self, logger: logging.Logger, extra: Optional[Dict[str, Any]] = None):
         super().__init__(logger, extra or {})
     
-    def process(self, msg: str, kwargs: dict) -> tuple:
+    def process(self, msg: str, kwargs: MutableMapping[str, Any]) -> tuple:
         """Add context to log message"""
         # Merge extra data
-        extra_data = {**self.extra}
+        extra_data = dict(self.extra or {})
         if "extra" in kwargs:
             extra_data.update(kwargs["extra"])
             del kwargs["extra"]
@@ -86,7 +135,7 @@ class ContextLogger(logging.LoggerAdapter):
 
 def setup_logging(
     level: str = "INFO",
-    log_file: str = None,
+    log_file: Optional[str] = None,
     json_format: bool = True
 ) -> logging.Logger:
     """
@@ -133,7 +182,7 @@ def setup_logging(
     return root_logger
 
 
-def get_logger(name: str, context: Dict[str, Any] = None) -> logging.Logger:
+def get_logger(name: str, context: Optional[Dict[str, Any]] = None) -> logging.Logger | logging.LoggerAdapter:
     """
     Get a logger with optional context
     
@@ -157,7 +206,7 @@ def get_logger(name: str, context: Dict[str, Any] = None) -> logging.Logger:
 # ============================================================
 
 def log_request(
-    logger: logging.Logger,
+    logger: logging.Logger | logging.LoggerAdapter,
     method: str,
     endpoint: str,
     status: int,
@@ -181,7 +230,7 @@ def log_request(
 
 
 def log_separation(
-    logger: logging.Logger,
+    logger: logging.Logger | logging.LoggerAdapter,
     model: str,
     audio_duration: float,
     processing_duration: float,
@@ -205,9 +254,9 @@ def log_separation(
 
 
 def log_error(
-    logger: logging.Logger,
+    logger: logging.Logger | logging.LoggerAdapter,
     error: Exception,
-    context: str = None,
+    context: Optional[str] = None,
     **extra
 ):
     """Log error with structured data"""
@@ -227,7 +276,7 @@ def log_error(
 
 
 def log_model_load(
-    logger: logging.Logger,
+    logger: logging.Logger | logging.LoggerAdapter,
     model: str,
     duration: float,
     device: str,
@@ -251,7 +300,7 @@ def log_model_load(
 
 
 def log_system_metrics(
-    logger: logging.Logger,
+    logger: logging.Logger | logging.LoggerAdapter,
     cpu_percent: float,
     memory_percent: float,
     disk_percent: float,

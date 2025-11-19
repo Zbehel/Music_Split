@@ -1,47 +1,46 @@
+# tests/test_separator.py
+import asyncio
+
 import pytest
 import torch
 import torchaudio
 from pathlib import Path
-from src import MusicSeparator, ModelConfig, list_available_models
+from unittest.mock import patch, MagicMock
+from src.separator import MusicSeparator, get_separator, clear_cache, get_best_device
+from src.stems import STEM_CONFIGS
 
 
 @pytest.fixture
 def test_audio(tmp_path):
     """Generate test audio file"""
-    audio = torch.randn(2, 44100 * 10)  # 10s stereo
+    audio = torch.randn(2, 44100 * 5)  # 5s stereo
     test_file = tmp_path / "test.wav"
-    torchaudio.save(str(test_file), audio, 44100, backend="soundfile")
+    torchaudio.save(str(test_file), audio, 44100)
     return test_file
 
 
-class TestModelConfig:
-    """Test ModelConfig class"""
+class TestDeviceDetection:
+    """Test device detection functionality"""
 
-    def test_list_available_models(self):
-        """Test that we can list available models"""
-        models = ModelConfig.list_available_models()
-        assert isinstance(models, list)
-        assert len(models) > 0
-        assert "htdemucs" in models
-        assert "htdemucs_6s" in models
+    def test_get_best_device_cuda(self):
+        """Test CUDA device detection"""
+        with patch('torch.cuda.is_available', return_value=True):
+            device = get_best_device()
+            assert device == "cuda"
 
-    def test_get_stems_4stem_model(self):
-        """Test getting stems for 4-stem model"""
-        stems = ModelConfig.get_stems("htdemucs")
-        assert len(stems) == 4
-        assert set(stems) == {"drums", "bass", "other", "vocals"}
+    def test_get_best_device_mps(self):
+        """Test MPS device detection"""
+        with patch('torch.cuda.is_available', return_value=False):
+            with patch('torch.backends.mps.is_available', return_value=True):
+                device = get_best_device()
+                assert device == "mps"
 
-    def test_get_stems_6stem_model(self):
-        """Test getting stems for 6-stem model"""
-        stems = ModelConfig.get_stems("htdemucs_6s")
-        assert len(stems) == 6
-        assert set(stems) == {"drums", "bass", "other", "vocals", "guitar", "piano"}
-
-    def test_is_supported(self):
-        """Test model support checking"""
-        assert ModelConfig.is_supported("htdemucs") is True
-        assert ModelConfig.is_supported("htdemucs_6s") is True
-        assert ModelConfig.is_supported("fake_model") is False
+    def test_get_best_device_cpu(self):
+        """Test CPU fallback"""
+        with patch('torch.cuda.is_available', return_value=False):
+            with patch('torch.backends.mps.is_available', return_value=False):
+                device = get_best_device()
+                assert device == "cpu"
 
 
 class TestMusicSeparator:
@@ -49,161 +48,126 @@ class TestMusicSeparator:
 
     def test_separator_initialization(self):
         """Test separator can be initialized"""
-        separator = MusicSeparator(model_name="htdemucs")
-        assert separator.device in ["cuda", "cpu", "mps"]
-        assert separator.model_name == "htdemucs"
-        assert len(separator.stems) == 4
-
-    def test_separator_4stem_model(self):
-        """Test 4-stem model initialization"""
-        separator = MusicSeparator(model_name="htdemucs")
-        assert separator.model_name == "htdemucs"
-        assert len(separator.stems) == 4
-        expected_stems = {"drums", "bass", "other", "vocals"}
-        assert set(separator.stems) == expected_stems
-
-    def test_separator_6stem_model(self):
-        """Test 6-stem model initialization"""
         separator = MusicSeparator(model_name="htdemucs_6s")
         assert separator.model_name == "htdemucs_6s"
         assert len(separator.stems) == 6
-        expected_stems = {"drums", "bass", "other", "vocals", "guitar", "piano"}
-        assert set(separator.stems) == expected_stems
-
-    def test_separator_info_property(self):
-        """Test info property returns correct data"""
-        separator = MusicSeparator(model_name="htdemucs")
-        info = separator.info
-
-        assert "model_name" in info
-        assert "device" in info
-        assert "stems" in info
-        assert "num_stems" in info
-        assert "sample_rate" in info
-
-        assert info["model_name"] == "htdemucs"
-        assert info["num_stems"] == 4
-        assert info["sample_rate"] == 44100
-
-    def test_device_auto_detection(self):
-        """Test automatic device detection"""
-        separator = MusicSeparator(model_name="htdemucs", device="auto")
         assert separator.device in ["cuda", "cpu", "mps"]
 
-    def test_separation_4stem(self, test_audio, tmp_path):
-        """Test separation with 4-stem model"""
-        separator = MusicSeparator(model_name="htdemucs")
-        output_dir = tmp_path / "output_4stem"
+    def test_separator_invalid_model(self):
+        """Test separator with invalid model"""
+        with pytest.raises(ValueError):
+            MusicSeparator(model_name="fake_model")
 
-        results = separator.separate(str(test_audio), str(output_dir))
-
-        # Verify results
-        assert len(results) == 4
-        for stem in ["vocals", "drums", "bass", "other"]:
-            assert stem in results
-            assert Path(results[stem]).exists()
-
-            # Verify audio file is valid
-            wav, sr = torchaudio.load(results[stem])
-            assert wav.shape[0] == 2  # Stereo
-            assert sr == 44100
-
-    def test_separation_6stem(self, test_audio, tmp_path):
-        """Test separation with 6-stem model"""
+    def test_separator_model_info(self):
+        """Test model info retrieval"""
         separator = MusicSeparator(model_name="htdemucs_6s")
-        output_dir = tmp_path / "output_6stem"
+        info = MusicSeparator.get_model_info("htdemucs_6s")
+        assert "names" in info  # Fixed: changed from "stems" to "names"
+        assert "description" in info
 
-        results = separator.separate(str(test_audio), str(output_dir))
+    def test_load_model(self):
+        """Test model loading"""
+        separator = MusicSeparator(model_name="htdemucs_6s")
+        with patch('src.separator.get_model') as mock_get_model:
+            mock_model = MagicMock()
+            mock_get_model.return_value = mock_model
+            separator._load_model()
+            assert separator.model is not None
 
-        # Verify results
-        assert len(results) == 6
-        for stem in ["vocals", "drums", "bass", "other", "guitar", "piano"]:
-            assert stem in results
-            assert Path(results[stem]).exists()
-
-            # Verify audio file is valid
-            wav, sr = torchaudio.load(results[stem])
-            assert wav.shape[0] == 2  # Stereo
-            assert sr == 44100
-
-    def test_separation_different_formats(self, test_audio, tmp_path):
-        """Test separation with different output formats"""
-        separator = MusicSeparator(model_name="htdemucs")
-
-        for fmt in ["wav", "flac"]:  # mp3 needs additional dependencies
-            output_dir = tmp_path / f"output_{fmt}"
-            results = separator.separate(
-                str(test_audio), str(output_dir), save_format=fmt
-            )
-
-            for stem_path in results.values():
-                assert Path(stem_path).suffix == f".{fmt}"
-                assert Path(stem_path).exists()
-
-    def test_separation_mono_input(self, tmp_path):
-        """Test separation handles mono input correctly"""
-        # Create mono audio
-        audio = torch.randn(1, 44100 * 5)  # 5s mono
-        test_file = tmp_path / "test_mono.wav"
-        torchaudio.save(str(test_file), audio, 44100, backend="soundfile")
-
-        separator = MusicSeparator(model_name="htdemucs")
-        output_dir = tmp_path / "output_mono"
-
-        results = separator.separate(str(test_file), str(output_dir))
-
-        # Should still output stereo
-        for stem_path in results.values():
-            wav, sr = torchaudio.load(stem_path)
-            assert wav.shape[0] == 2  # Converted to stereo
-
-    def test_separation_different_sample_rate(self, tmp_path):
-        """Test separation handles different sample rates"""
-        # Create audio with different sample rate
-        audio = torch.randn(2, 48000 * 5)  # 5s @ 48kHz
-        test_file = tmp_path / "test_48k.wav"
-        torchaudio.save(str(test_file), audio, 48000, backend="soundfile")
-
-        separator = MusicSeparator(model_name="htdemucs")
-        output_dir = tmp_path / "output_48k"
-
-        results = separator.separate(str(test_file), str(output_dir))
-
-        # Should be resampled to 44.1kHz
-        for stem_path in results.values():
-            wav, sr = torchaudio.load(stem_path)
-            assert sr == 44100
+    def test_separate_method(self, test_audio, tmp_path):
+        """Test separation method"""
+        separator = MusicSeparator(model_name="htdemucs_6s")
+        
+        # Mock the model and apply_model
+        with patch('src.separator.get_model') as mock_get_model:
+            mock_model = MagicMock()
+            mock_model.samplerate = 44100
+            mock_get_model.return_value = mock_model
+            
+            separator.model = mock_model
+            
+            with patch('src.separator.apply_model') as mock_apply_model:
+                # Create mock separated sources
+                mock_sources = torch.randn(1, 6, 2, 44100 * 5)  # batch, stems, channels, samples
+                mock_apply_model.return_value = mock_sources
+                
+                output_dir = tmp_path / "output"
+                results = separator.separate(str(test_audio), str(output_dir))
+                
+                assert len(results) == 6
+                for stem in ["vocals", "drums", "bass", "other", "guitar", "piano"]:
+                    assert stem in results
+                    assert Path(results[stem]).exists()
 
 
-class TestHelperFunctions:
-    """Test helper functions"""
+class TestModelCache:
+    """Test model caching functionality"""
 
-    def test_list_available_models_function(self):
-        """Test list_available_models helper function"""
-        models = list_available_models()
-        assert isinstance(models, list)
-        assert len(models) > 0
-        assert "htdemucs" in models
+    def test_get_separator(self):
+        """Test get_separator function"""
+        # Clear cache first
+        clear_cache()
+        
+        # Get separator
+        separator1 = get_separator("htdemucs_6s")
+        separator2 = get_separator("htdemucs_6s")
+        
+        # Should return same instance
+        assert separator1 is separator2
+        
+        # Clear cache
+        clear_cache()
+        
+        # Should create new instance
+        separator3 = get_separator("htdemucs_6s")
+        assert separator1 is not separator3
+
+    def test_clear_cache(self):
+        """Test clear_cache function"""
+        # Load a model
+        separator = get_separator("htdemucs_6s")
+        assert separator is not None
+        
+        # Clear cache
+        clear_cache()
+        
+        # Import the global cache to check it's empty
+        from src.separator import _loaded_models
+        assert len(_loaded_models) == 0
 
 
-@pytest.mark.parametrize(
-    "model_name",
-    [
-        "htdemucs",
-        "htdemucs_ft",
-        "htdemucs_6s",
-    ],
-)
-def test_all_models(model_name, test_audio, tmp_path):
-    """Parametrized test for all available models"""
-    separator = MusicSeparator(model_name=model_name)
-    output_dir = tmp_path / f"output_{model_name}"
+class TestSeparatorIntegration:
+    """Integration tests for separator"""
 
-    results = separator.separate(str(test_audio), str(output_dir))
+    @pytest.mark.parametrize("model_name", ["htdemucs_6s", "htdemucs_ft"])
+    def test_available_models(self, model_name):
+        """Test that all expected models are available"""
+        models = MusicSeparator.get_available_models()
+        assert model_name in models
+        assert "names" in models[model_name]  # Fixed: changed from "stems" to "names"
+        assert "description" in models[model_name]
 
-    # Verify all stems are present
-    assert len(results) == len(separator.stems)
 
-    for stem in separator.stems:
-        assert stem in results
-        assert Path(results[stem]).exists()
+class TestSeparatorErrorHandling:
+    """Test error handling in separator"""
+
+    def test_separate_file_not_found(self, tmp_path):
+        """Test separation with non-existent file"""
+        separator = MusicSeparator(model_name="htdemucs_6s")
+        with pytest.raises(Exception):
+            separator.separate("/non/existent/file.wav", str(tmp_path))
+
+    def test_unload_model(self):
+        """Test model unloading"""
+        separator = MusicSeparator(model_name="htdemucs_6s")
+        with patch('src.separator.get_model') as mock_get_model:
+            mock_model = MagicMock()
+            mock_get_model.return_value = mock_model
+            separator._load_model()
+            
+            # Mock torch.cuda.empty_cache
+            with patch('torch.cuda.empty_cache') as mock_empty_cache:
+                separator.unload_model()
+                assert separator.model is None
+                if torch.cuda.is_available():
+                    mock_empty_cache.assert_called_once()

@@ -6,7 +6,7 @@ Uses JSON formatting for easy parsing by log aggregators
 import logging
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 from pathlib import Path
 import traceback
@@ -23,7 +23,7 @@ class StructuredFormatter(logging.Formatter):
         
         # Base log structure
         log_data = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
