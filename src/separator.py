@@ -49,7 +49,20 @@ class MusicSeparator:
         self.model_name = model_name
         self.model_config = self.AVAILABLE_MODELS[model_name]
         self.stems = get_stems(model_name)  # ✅ Get from shared config
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # Default to auto-detected best device (CUDA > MPS > CPU) unless overridden
+        if device:
+            requested = device.lower()
+            # Validate requested device availability
+            if requested == "cuda" and not torch.cuda.is_available():
+                logger.warning("Requested device 'cuda' not available, falling back to best available device")
+                self.device = get_best_device()
+            elif requested == "mps" and not (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()):
+                logger.warning("Requested device 'mps' not available, falling back to best available device")
+                self.device = get_best_device()
+            else:
+                self.device = requested
+        else:
+            self.device = get_best_device()
         self.model: Optional[Any] = None
         self.model_type = self.model_config["type"]
         

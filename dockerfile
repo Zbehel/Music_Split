@@ -11,13 +11,17 @@ RUN apt-get update && apt-get install -y \
 
 # Copier requirements
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Use the Python executable to run pip to ensure packages install into the same environment
+RUN python -m pip install --upgrade pip setuptools wheel || true
+RUN ( /opt/conda/bin/python -m pip install --no-cache-dir -r requirements.txt ) || \
+    ( python -m pip install --no-cache-dir -r requirements.txt ) || \
+    ( echo "Primary pip install failed, retrying specific packages with conda/python pip" && /opt/conda/bin/python -m pip install --no-cache-dir celery redis prometheus-client || python -m pip install --no-cache-dir celery redis prometheus-client )
 
 # Copier code
 COPY src/ ./src/
 
 # Télécharger modèle au build (évite download à chaque run)
-RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
+# RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 
 # Variables d'environnement par défaut (peuvent être surchargées)
 ENV MODEL_NAME=htdemucs

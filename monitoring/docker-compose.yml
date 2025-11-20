@@ -23,7 +23,7 @@ services:
       - DEMUCS_USE_TORCHCODEC=0
     command: uvicorn src.api:app --host 0.0.0.0 --port 8000 --log-level info
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -64,7 +64,7 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      test: [ "CMD", "curl", "-f", "http://localhost:7860" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -87,7 +87,7 @@ services:
     image: prom/prometheus:latest
     container_name: music-separator-prometheus
     ports:
-      - "9090:9090"
+      - "9094:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - ./alert_rules.yml:/etc/prometheus/alert_rules.yml

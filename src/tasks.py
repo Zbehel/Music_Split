@@ -8,7 +8,7 @@ from celery import states
 
 
 @celery.task(bind=True)
-def separate_task(self, model_name: str, input_path: str, output_dir: str):
+def separate_task(self, model_name: str, input_path: str, output_dir: str, device: str = None):
     """Celery task that runs separation using MusicSeparator.
     It stores results on disk and returns a dict of stem->path.
     Increments/decrements a Redis counter to track running jobs.
@@ -38,7 +38,7 @@ def separate_task(self, model_name: str, input_path: str, output_dir: str):
         # Lazy import to avoid heavy imports at module import time
         from src.separator import MusicSeparator
 
-        separator = MusicSeparator(model_name=model_name)
+        separator = MusicSeparator(model_name=model_name, device=device)
         res = separator.separate(str(input_path), str(output_dir))
         return res
     except Exception as e:
