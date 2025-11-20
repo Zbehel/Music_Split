@@ -8,6 +8,7 @@ set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
@@ -170,6 +171,17 @@ case $choice in
             echo ""
             echo "Stopping and removing everything..."
             docker-compose -f $COMPOSE_FILE down -v
+                # Ask whether to also remove built images
+                echo ""
+                echo -e "${ORANGE}Also remove built images (music-separator:latest)?${NC}"
+                read -p "Type 'yes' to confirm:" remove_images
+                if [ "$remove_images" = "yes" ]; then
+                    echo "Removing images..."
+                    # Use docker-compose to remove images built by the service
+                    docker-compose -f $COMPOSE_FILE down --rmi all -v --remove-orphans
+                    echo ""
+                    echo -e "${GREEN}✅ Images removed${NC}"
+                fi
             echo ""
             echo -e "${GREEN}✅ Cleaned up${NC}"
         else

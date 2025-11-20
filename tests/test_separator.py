@@ -1,5 +1,4 @@
 # tests/test_separator.py
-import asyncio
 
 import pytest
 import torch
