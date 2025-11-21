@@ -1,11 +1,19 @@
-
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAudioSync } from './useAudioSync';
-import { Play, Pause, Volume2, VolumeX, Upload, Youtube, Download, Music } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Upload, Youtube, Download, Music, Disc, Layers, Activity, Settings, CheckCircle } from 'lucide-react';
 import axios from 'axios';
 import clsx from 'clsx';
+import Spectrum from './Spectrum';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+const STEM_COLORS = {
+  vocals: '#6366f1', // Indigo
+  drums: '#ef4444', // Red
+  bass: '#a855f7', // Purple
+  other: '#10b981', // Emerald
+  original: '#f59e0b' // Amber
+};
 
 function App() {
   const [mode, setMode] = useState('upload'); // 'upload' or 'youtube'
@@ -13,10 +21,16 @@ function App() {
   const [ytUrl, setYtUrl] = useState('');
   const [status, setStatus] = useState('idle'); // idle, uploading, processing, done, error
   const [jobId, setJobId] = useState(null);
-  const [stems, setStems] = useState([]); // [{name: 'vocals', url: '...'}]
+  const [stems, setStems] = useState([]);
+  const [originalSourceUrl, setOriginalSourceUrl] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [progress, setProgress] = useState(0);
+  const [audioElements, setAudioElements] = useState({}); // { name: element }
+  const [models, setModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState('htdemucs_6s');
+  const [errorMsg, setErrorMsg] = useState('');
 
+  // Audio Sync Hook
   const {
     isPlaying,
     currentTime,
@@ -30,10 +44,6 @@ function App() {
     registerAudio
   } = useAudioSync(stems);
 
-  const [models, setModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useState('htdemucs_6s');
-  const [errorMsg, setErrorMsg] = useState('');
-
   // Fetch models on mount
   useEffect(() => {
     axios.get(`${API_URL}/models`)
@@ -45,14 +55,20 @@ function App() {
       })
       .catch(err => {
         console.error("Failed to fetch models", err);
-        setErrorMsg("Failed to connect to API. Check if backend is running.");
+        setErrorMsg("Failed to connect to API.");
       });
   }, []);
 
   const handleUpload = async () => {
     if (!file) return;
+
+    // Immediate local playback for upload
+    const localUrl = URL.createObjectURL(file);
+    setOriginalSourceUrl(localUrl);
+
     setStatus('uploading');
     setErrorMsg('');
+    setStems([]); // Clear previous stems
 
     const formData = new FormData();
     formData.append('file', file);
@@ -72,6 +88,8 @@ function App() {
     if (!ytUrl) return;
     setStatus('processing');
     setErrorMsg('');
+    setStems([]);
+    setOriginalSourceUrl(null); // Reset for new YouTube link
 
     try {
       const res = await axios.post(`${API_URL}/separate/youtube`, {
@@ -91,11 +109,9 @@ function App() {
     setStatus('processing');
     setProgress(0);
 
-    // Simulated progress interval
     const progressInterval = setInterval(() => {
       setProgress(prev => {
         if (prev >= 90) return prev;
-        // Slow down as we get closer to 90%
         const increment = prev < 50 ? 5 : prev < 80 ? 2 : 0.5;
         return prev + increment;
       });
@@ -104,6 +120,18 @@ function App() {
     const interval = setInterval(async () => {
       try {
         const res = await axios.get(`${API_URL}/status/${id}`);
+
+        // Set original source as soon as session ID is available (for YouTube)
+        if (res.data.session_id) {
+          setOriginalSourceUrl(prev => {
+            // Only set if not already set and mode is youtube
+            if (!prev && mode === 'youtube') {
+              return `${API_URL}/download/${res.data.session_id}/original`;
+            }
+            return prev;
+          });
+        }
+
         if (res.data.status === 'done') {
           clearInterval(interval);
           clearInterval(progressInterval);
@@ -111,45 +139,43 @@ function App() {
           setStatus('done');
           setSessionId(res.data.session_id);
 
-          // Parse result to get stems
-          const resultStems = res.data.result; // {'vocals': 'path', ...}
+          // Ensure original source is set for YouTube mode
+          if (mode === 'youtube' && res.data.session_id) {
+            setOriginalSourceUrl(`${API_URL}/download/${res.data.session_id}/original`);
+          }
+
+          const resultStems = res.data.result;
           const stemList = Object.keys(resultStems).map(name => ({
             name,
-            url: `${API_URL}/download/${res.data.session_id}/${name}`
+            url: `${API_URL}/download/${res.data.session_id}/${name}`,
+            isOriginal: false
           }));
           setStems(stemList);
+
         } else if (res.data.status === 'error') {
           clearInterval(interval);
           clearInterval(progressInterval);
           setStatus('error');
+          setErrorMsg(res.data.error || "Processing failed");
         }
       } catch (e) {
-        clearInterval(interval);
-        clearInterval(progressInterval);
-        setStatus('error');
+        // Ignore polling errors
       }
     }, 2000);
   };
 
   const handleMixDownload = async () => {
     if (!sessionId) return;
-
-    // Prepare mix payload
     const mixPayload = {
       session_id: sessionId,
       stems: {}
     };
-
-    // Use current volumes (if muted, volume is 0)
     stems.forEach(stem => {
       mixPayload.stems[stem.name] = muted[stem.name] ? 0.0 : (volumes[stem.name] || 1.0);
     });
 
     try {
-      const response = await axios.post(`${API_URL}/mix`, mixPayload, {
-        responseType: 'blob'
-      });
-
+      const response = await axios.post(`${API_URL}/mix`, mixPayload, { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
@@ -163,198 +189,249 @@ function App() {
   };
 
   const formatTime = (t) => {
+    if (!t && t !== 0) return "0:00";
     const mins = Math.floor(t / 60);
     const secs = Math.floor(t % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white p-8 font-sans">
-      <div className="max-w-4xl mx-auto">
-        <header className="mb-10">
-          <div className="flex items-center gap-4 mb-6">
-            <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/30">
-              <Music className="w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">
-                Music Separator
-              </h1>
-              <p className="text-slate-400">AI-Powered Stem Separation</p>
-            </div>
+    <div className="flex h-screen w-screen bg-[#0f172a] text-white overflow-hidden font-sans">
+
+      {/* SIDEBAR - Controls */}
+      <div className="w-80 flex-shrink-0 bg-slate-900/50 border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto backdrop-blur-md z-20">
+        {/* Header */}
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <Music className="text-white" size={20} />
           </div>
-
-          {/* Model Selector */}
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-slate-400 mb-2">Select Model</label>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 focus:outline-none focus:border-indigo-500 text-white"
-            >
-              {models.map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
+          <div>
+            <h1 className="font-bold text-xl tracking-tight">Music Split</h1>
+            <p className="text-xs text-slate-400">AI Stem Separator</p>
           </div>
+        </div>
 
-          {/* Error Message */}
-          {errorMsg && (
-            <div className="mb-6 p-4 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm">
-              {errorMsg}
-            </div>
-          )}
-        </header>
+        {/* Input Mode Switch */}
+        <div className="bg-slate-800/50 p-1 rounded-xl flex text-sm font-medium">
+          <button
+            onClick={() => setMode('upload')}
+            className={clsx("flex-1 py-2 rounded-lg transition-all flex items-center justify-center gap-2", mode === 'upload' ? "bg-indigo-600 text-white shadow-md" : "text-slate-400 hover:text-white")}
+          >
+            <Upload size={16} /> Upload
+          </button>
+          <button
+            onClick={() => setMode('youtube')}
+            className={clsx("flex-1 py-2 rounded-lg transition-all flex items-center justify-center gap-2", mode === 'youtube' ? "bg-red-600 text-white shadow-md" : "text-slate-400 hover:text-white")}
+          >
+            <Youtube size={16} /> YouTube
+          </button>
+        </div>
 
-        {/* INPUT SECTION */}
-        <div className="bg-slate-800/50 backdrop-blur-sm rounded-2xl p-6 border border-slate-700 mb-8">
-          <div className="flex gap-4 mb-6">
-            <button
-              onClick={() => setMode('upload')}
-              className={clsx(
-                "flex items-center gap-2 px-4 py-2 rounded-lg transition-all",
-                mode === 'upload' ? "bg-indigo-600 text-white" : "bg-slate-700 text-slate-300 hover:bg-slate-600"
-              )}
-            >
-              <Upload size={18} /> Upload File
-            </button>
-            <button
-              onClick={() => setMode('youtube')}
-              className={clsx(
-                "flex items-center gap-2 px-4 py-2 rounded-lg transition-all",
-                mode === 'youtube' ? "bg-red-600 text-white" : "bg-slate-700 text-slate-300 hover:bg-slate-600"
-              )}
-            >
-              <Youtube size={18} /> YouTube URL
-            </button>
-          </div>
-
+        {/* Input Area */}
+        <div className="flex-1 flex flex-col gap-4">
           {mode === 'upload' ? (
-            <div className="border-2 border-dashed border-slate-600 rounded-xl p-8 text-center hover:border-indigo-500 transition-colors">
+            <div className="border-2 border-dashed border-slate-700 rounded-2xl p-6 text-center hover:border-indigo-500/50 transition-colors bg-slate-800/20">
               <input
                 type="file"
                 onChange={(e) => setFile(e.target.files[0])}
-                className="block w-full text-sm text-slate-400
-                  file:mr-4 file:py-2 file:px-4
-                  file:rounded-full file:border-0
-                  file:text-sm file:font-semibold
-                  file:bg-indigo-50 file:text-indigo-700
-                  hover:file:bg-indigo-100"
+                className="hidden"
+                id="file-upload"
               />
-              <button
-                onClick={handleUpload}
-                disabled={!file || status === 'processing' || status === 'uploading'}
-                className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {status === 'uploading' ? 'Uploading...' : 'Start Separation'}
-              </button>
+              <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center gap-3">
+                <div className="w-12 h-12 bg-indigo-500/10 rounded-full flex items-center justify-center text-indigo-400">
+                  <Upload size={24} />
+                </div>
+                <span className="text-sm text-slate-300 font-medium">
+                  {file ? file.name : "Click to browse"}
+                </span>
+                <span className="text-xs text-slate-500">Supports MP3, WAV, FLAC</span>
+              </label>
             </div>
           ) : (
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-medium text-slate-400 ml-1">YouTube URL</label>
               <input
                 type="text"
                 value={ytUrl}
                 onChange={(e) => setYtUrl(e.target.value)}
-                placeholder="Paste YouTube URL here..."
-                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 focus:outline-none focus:border-indigo-500"
+                placeholder="https://youtube.com/watch?v=..."
+                className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition-all"
               />
-              <button
-                onClick={handleYoutube}
-                disabled={!ytUrl || status === 'processing'}
-                className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-lg font-medium disabled:opacity-50 transition-colors"
-              >
-                Process
-              </button>
             </div>
           )}
 
-          {status === 'processing' && (
-            <div className="mt-6 text-center">
-              <div className="flex justify-between text-sm text-indigo-300 mb-2">
-                <span className="font-medium">Processing Audio...</span>
+          {/* Model Selector */}
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-medium text-slate-400 ml-1">Separation Model</label>
+            <div className="relative">
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full appearance-none bg-slate-800 border border-slate-700 text-slate-300 py-3 pl-4 pr-10 rounded-xl text-sm focus:outline-none focus:border-indigo-500 cursor-pointer"
+              >
+                {models.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <Settings className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" size={14} />
+            </div>
+          </div>
+
+          {/* Action Button */}
+          <button
+            onClick={mode === 'upload' ? handleUpload : handleYoutube}
+            disabled={status === 'processing' || status === 'uploading' || (mode === 'upload' && !file) || (mode === 'youtube' && !ytUrl)}
+            className="mt-auto w-full bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-indigo-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-[0.98]"
+          >
+            {status === 'processing' ? 'Processing...' : status === 'uploading' ? 'Uploading...' : 'Start Separation'}
+          </button>
+
+          {/* Status & Progress */}
+          {(status === 'processing' || status === 'uploading') && (
+            <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+              <div className="flex justify-between text-xs text-indigo-300 mb-2 font-medium">
+                <span className="flex items-center gap-2"><Activity className="animate-spin" size={12} /> Processing</span>
                 <span>{Math.round(progress)}%</span>
               </div>
-              <div className="w-full bg-slate-700 rounded-full h-3 overflow-hidden shadow-inner">
-                <div
-                  className="bg-gradient-to-r from-indigo-500 to-cyan-400 h-full rounded-full transition-all duration-500 ease-out shadow-[0_0_10px_rgba(99,102,241,0.5)]"
-                  style={{ width: `${progress}%` }}
-                >
-                  <div className="w-full h-full opacity-30 bg-[linear-gradient(45deg,rgba(255,255,255,0.2)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.2)_50%,rgba(255,255,255,0.2)_75%,transparent_75%,transparent)] bg-[length:1rem_1rem] animate-[progress-stripes_1s_linear_infinite]"></div>
+              <div className="w-full bg-slate-700 rounded-full h-1.5 overflow-hidden">
+                <div className="bg-indigo-500 h-full rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+              </div>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-xs text-center">
+              {errorMsg}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* MAIN CONTENT - Player Dashboard */}
+      <div className="flex-1 flex flex-col relative overflow-hidden">
+        {/* Background Gradients */}
+        <div className="absolute inset-0 pointer-events-none">
+          <div className="absolute top-[-20%] right-[-10%] w-[60%] h-[60%] bg-indigo-600/10 rounded-full blur-[150px]" />
+          <div className="absolute bottom-[-20%] left-[-10%] w-[50%] h-[50%] bg-cyan-600/10 rounded-full blur-[150px]" />
+        </div>
+
+        {/* Top Section: Master Control */}
+        <div className="h-auto p-8 flex flex-col justify-center relative z-10 border-b border-white/5 bg-slate-900/20 backdrop-blur-sm">
+          {stems.length > 0 ? (
+            <div className="max-w-4xl mx-auto w-full">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h2 className="text-3xl font-bold text-white mb-1">Stems Master Control</h2>
+                  <p className="text-slate-400 flex items-center gap-2 text-sm">
+                    <Layers size={14} /> Control all separated stems
+                  </p>
+                </div>
+                {status === 'done' && (
+                  <div className="flex items-center gap-2 px-4 py-2 bg-green-500/10 text-green-400 rounded-full border border-green-500/20 text-sm font-medium">
+                    <CheckCircle size={16} /> Separation Complete
+                  </div>
+                )}
+              </div>
+
+              {/* Master Controls */}
+              <div className="bg-slate-800/40 border border-white/10 rounded-2xl p-6 backdrop-blur-md shadow-xl">
+                <div className="flex items-center gap-6">
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={togglePlay}
+                      className="w-14 h-14 bg-indigo-500 hover:bg-indigo-400 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/30 transition-all hover:scale-105 active:scale-95"
+                    >
+                      {isPlaying ? <Pause fill="white" size={24} /> : <Play fill="white" size={24} ml={1} />}
+                    </button>
+                    <div>
+                      <div className="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-1">Master Playback</div>
+                      <div className="text-sm text-slate-300 font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
+                    </div>
+                  </div>
+
+                  {/* Master Seek Bar */}
+                  <div className="flex-1 relative h-3 group cursor-pointer">
+                    <div className="absolute inset-0 bg-slate-700 rounded-full"></div>
+                    <div
+                      className="absolute top-0 left-0 h-full bg-gradient-to-r from-indigo-500 to-cyan-500 rounded-full"
+                      style={{ width: `${(currentTime / duration) * 100}%` }}
+                    ></div>
+                    <input
+                      type="range"
+                      min="0"
+                      max={duration || 100}
+                      value={currentTime}
+                      onChange={(e) => seek(Number(e.target.value))}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleMixDownload}
+                    className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
+                    title="Download mix with current volume settings"
+                  >
+                    <Download size={16} /> Download Mix
+                  </button>
                 </div>
               </div>
-              <p className="text-xs text-slate-500 mt-3 animate-pulse">
-                AI is separating your tracks. This usually takes 1-2 minutes.
-              </p>
+            </div>
+          ) : (
+            <div className="text-center text-slate-500">
+              <div className="w-20 h-20 bg-slate-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Music size={32} className="opacity-50" />
+              </div>
+              <h3 className="text-xl font-medium text-slate-400">Ready to Separate</h3>
+              <p className="text-sm opacity-60">Upload a file or paste a YouTube link to begin</p>
             </div>
           )}
         </div>
 
-        {/* PLAYER SECTION */}
-        {status === 'done' && stems.length > 0 && (
-          <div className="bg-slate-800/50 backdrop-blur-sm rounded-2xl p-6 border border-slate-700 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-semibold flex items-center gap-2">
-                <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-                Separation Complete
-              </h2>
-              <button
-                onClick={handleMixDownload}
-                className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-              >
-                <Download size={16} /> Download Mix
-              </button>
-            </div>
-
-            {/* Master Controls */}
-            <div className="bg-slate-900/50 rounded-xl p-4 mb-6 border border-slate-700/50">
-              <div className="flex items-center gap-4 mb-4">
-                <button
-                  onClick={togglePlay}
-                  className="w-12 h-12 bg-indigo-500 hover:bg-indigo-600 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/20 transition-all hover:scale-105"
-                >
-                  {isPlaying ? <Pause fill="white" /> : <Play fill="white" className="ml-1" />}
-                </button>
-                <div className="flex-1">
-                  <input
-                    type="range"
-                    min="0"
-                    max={duration || 100}
-                    value={currentTime}
-                    onChange={(e) => seek(Number(e.target.value))}
-                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                  />
-                  <div className="flex justify-between text-xs text-slate-400 mt-1">
-                    <span>{formatTime(currentTime)}</span>
-                    <span>{formatTime(duration)}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Stems List */}
-            <div className="space-y-3">
+        {/* Bottom Section: Stems Grid */}
+        <div className="flex-1 p-8 overflow-y-auto bg-slate-900/30">
+          {stems.length > 0 ? (
+            <div className="w-full grid gap-3 pb-20">
               {stems.map((stem) => (
-                <div key={stem.name} className="bg-slate-700/30 rounded-lg p-3 flex items-center gap-4 hover:bg-slate-700/50 transition-colors border border-transparent hover:border-slate-600">
-                  <div className="w-24 font-medium capitalize text-slate-300">{stem.name}</div>
-
-                  {/* Hidden Audio Element */}
+                <div
+                  key={stem.name}
+                  className="group flex items-center gap-6 bg-slate-800/40 hover:bg-slate-800/60 border border-white/5 hover:border-indigo-500/30 rounded-xl p-4 transition-all duration-300"
+                >
+                  {/* Hidden Audio */}
                   <audio
-                    ref={(el) => registerAudio(stem.name, el)}
+                    ref={(el) => {
+                      registerAudio(stem.name, el);
+                      if (el && audioElements[stem.name] !== el) {
+                        setAudioElements(prev => ({ ...prev, [stem.name]: el }));
+                      }
+                    }}
                     src={stem.url}
                     preload="auto"
+                    crossOrigin="anonymous"
                   />
 
-                  <div className="flex-1 flex items-center gap-4">
+                  {/* Stem Info */}
+                  <div className="w-24 shrink-0">
+                    <div className="text-sm font-bold uppercase tracking-wider text-slate-300">{stem.name}</div>
+                    <div className="h-1 w-8 mt-1 rounded-full" style={{ backgroundColor: STEM_COLORS[stem.name] }}></div>
+                  </div>
+
+                  {/* Controls */}
+                  <div className="flex items-center gap-3">
                     <button
                       onClick={() => toggleMute(stem.name)}
                       className={clsx(
-                        "p-2 rounded-lg transition-colors",
-                        muted[stem.name] ? "bg-red-500/20 text-red-400" : "bg-slate-600 text-slate-300 hover:bg-slate-500"
+                        "p-2 rounded-lg transition-all",
+                        muted[stem.name] ? "bg-red-500/10 text-red-400" : "bg-slate-700/50 text-slate-400 hover:text-white"
                       )}
                     >
                       {muted[stem.name] ? <VolumeX size={18} /> : <Volume2 size={18} />}
                     </button>
+                  </div>
 
+                  {/* Volume Slider */}
+                  <div className="w-32 relative h-1.5 bg-slate-700/50 rounded-full overflow-hidden group-hover:h-2 transition-all">
+                    <div
+                      className={clsx("absolute top-0 left-0 h-full rounded-full transition-all", muted[stem.name] ? "bg-slate-600" : "bg-indigo-500")}
+                      style={{ width: `${(volumes[stem.name] || 0) * 100}%`, backgroundColor: muted[stem.name] ? undefined : STEM_COLORS[stem.name] }}
+                    ></div>
                     <input
                       type="range"
                       min="0"
@@ -362,14 +439,23 @@ function App() {
                       step="0.01"
                       value={volumes[stem.name] || 1}
                       onChange={(e) => setVolume(stem.name, parseFloat(e.target.value))}
-                      className="flex-1 h-1.5 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-indigo-400"
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                     />
                   </div>
 
+                  {/* Spectrum Visualizer - Explicitly placed on the right */}
+                  <div className="flex-1 h-[40px] flex items-center justify-center bg-slate-900/50 rounded-lg border border-white/5">
+                    <Spectrum
+                      audioNode={audioElements[stem.name]}
+                      color={STEM_COLORS[stem.name] || '#cbd5e1'}
+                    />
+                  </div>
+
+                  {/* Download */}
                   <a
                     href={stem.url}
                     download
-                    className="p-2 text-slate-400 hover:text-white hover:bg-slate-600 rounded-lg transition-colors"
+                    className="p-2 text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-lg transition-all"
                     title="Download Stem"
                   >
                     <Download size={18} />
@@ -377,12 +463,16 @@ function App() {
                 </div>
               ))}
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-slate-600 opacity-50">
+              <Layers size={48} className="mb-4" />
+              <p>Stems will appear here after separation</p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 export default App;
-

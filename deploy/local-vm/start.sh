@@ -19,13 +19,20 @@ echo "  📊 MUSIC SEPARATOR - MONITORING STACK"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
-# Check Docker
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}❌ Docker not found${NC}"
+# Ensure we are in the project root
+cd "$(dirname "$0")/../.."
+
+# Check if docker is running
+if ! docker info > /dev/null 2>&1; then
+    echo "Error: Docker is not running"
     exit 1
 fi
 
-echo -e "${GREEN}✅ Docker found${NC}"
+# Create temp directories
+mkdir -p tmp/music-separator
+mkdir -p results
+
+echo -e "${GREEN}✅ Docker found and running${NC}"
 echo ""
 
 # Menu

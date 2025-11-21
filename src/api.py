@@ -812,6 +812,35 @@ def download_stem(session_id: str, stem_name: str):
     )
 
 
+@app.get("/download/{session_id}/original")
+def download_original(session_id: str):
+    """
+    Télécharge le fichier original (input.wav)
+    """
+    file_path = TEMP_DIR / session_id / "input.wav"
+    
+    if not file_path.exists():
+        logger.warning(
+            f"Original file not found",
+            extra={"session_id": session_id}
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Fichier original non trouvé pour session {session_id}"
+        )
+    
+    logger.info(
+        f"Original download",
+        extra={"session_id": session_id}
+    )
+    
+    return FileResponse(
+        path=str(file_path),
+        media_type="audio/wav",
+        filename="original.wav"
+    )
+
+
 @app.get("/status/{job_id}")
 def get_job_status(job_id: str):
     """Retourne l'état d'un job de séparation"""

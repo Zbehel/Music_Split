@@ -37,4 +37,5 @@ ENV OUTPUT_FORMAT=wav
 EXPOSE 8000
 
 # Commande par défaut
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Commande par défaut (supporte la variable PORT injectée par Cloud Run)
+CMD ["sh", "-c", "uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000}"]
