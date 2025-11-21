@@ -11,7 +11,7 @@ if [ -f .env ]; then
 fi
 
 # Configuration
-PROJECT_ID="zmusic-split"
+PROJECT_ID="zmusic-split-new"
 REGION="europe-west1"
 SERVICE_NAME="music-separator-service"
 IMAGE_NAME="music-separator-api"
