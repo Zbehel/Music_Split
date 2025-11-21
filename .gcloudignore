@@ -1,0 +1,16 @@
+.git
+.gitignore
+.dockerignore
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+web/node_modules/
+web/dist/
+results/
+tmp/
+test.mp3
+benchmark_output/
+separated/

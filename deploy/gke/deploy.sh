@@ -1,11 +1,16 @@
+```bash
 #!/bin/bash
 set -e
 
+# Ensure we are in the project root
+cd "$(dirname "$0")/../.."
+PROJECT_ROOT=$(pwd)
+
 # Configuration
-PROJECT_ID=$(gcloud config get-value project)
+PROJECT_ID="zmusic-split"
 REGION="europe-west1" # Change this if needed
 REPO_NAME="music-separator"
-IMAGE_NAME="api"
+IMAGE_NAME="music-separator-api"
 TAG="latest"
 
 if [ -z "$PROJECT_ID" ]; then
