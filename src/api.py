@@ -41,8 +41,10 @@ _metrics_stop_event = threading.Event()
 _metrics_thread: Optional[threading.Thread] = None
 _METRICS_INTERVAL = int(os.environ.get("METRICS_PUBLISH_INTERVAL", "15"))
 
-# Job management (in-memory). For higher scale, persist to Redis/DB.
-JOBS: Dict[str, Dict] = {}
+import json
+from pathlib import Path
+
+
 # Process pool for CPU-bound separation tasks — created at lifespan startup
 _process_pool: Optional[ProcessPoolExecutor] = None
 _PROCESS_POOL_MAX_WORKERS = int(os.environ.get("PROCESS_POOL_WORKERS", "2"))
@@ -141,7 +143,14 @@ def download_youtube_audio(url: str, output_dir: Path) -> Path:
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
+        # Use OAuth2 for authentication to bypass bot detection
+        'username': 'oauth2',
+        'password': '',
     }
+    
+    # Check for cookies.txt in current directory or secrets
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -157,9 +166,69 @@ def download_youtube_audio(url: str, output_dir: Path) -> Path:
 setup_logging(level="INFO", json_format=True)
 logger = get_logger(__name__)
 
+import json
+from pathlib import Path
+
+class JobManager:
+    def __init__(self, persistence_dir: Optional[str] = None):
+        self.persistence_dir = Path(persistence_dir) if persistence_dir else None
+        self._memory_jobs = {}
+        if self.persistence_dir:
+            self.persistence_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"JobManager using persistence dir: {self.persistence_dir}")
+
+    def _get_file_path(self, job_id: str) -> Path:
+        return self.persistence_dir / f"{job_id}.json"
+
+    def __getitem__(self, job_id: str) -> Dict:
+        if self.persistence_dir:
+            fpath = self._get_file_path(job_id)
+            if fpath.exists():
+                try:
+                    with open(fpath, "r") as f:
+                        data = json.load(f)
+                        # Restore future if it was in memory (not persisted)
+                        # Note: futures cannot be persisted. If we restart, future is lost.
+                        # But status should be updated before future is done?
+                        # If status is 'running' and we restarted, it's effectively 'failed' or 'lost'.
+                        return data
+                except Exception as e:
+                    logger.error(f"Failed to load job {job_id}: {e}")
+        return self._memory_jobs[job_id]
+
+    def __setitem__(self, job_id: str, data: Dict):
+        # Remove non-serializable objects for persistence
+        persist_data = data.copy()
+        if "future" in persist_data:
+            del persist_data["future"]
+        
+        if self.persistence_dir:
+            try:
+                with open(self._get_file_path(job_id), "w") as f:
+                    json.dump(persist_data, f)
+            except Exception as e:
+                logger.error(f"Failed to save job {job_id}: {e}")
+        
+        self._memory_jobs[job_id] = data
+
+    def get(self, job_id: str, default=None):
+        try:
+            return self[job_id]
+        except KeyError:
+            return default
+
+    def __contains__(self, job_id: str):
+        if self.persistence_dir:
+            return self._get_file_path(job_id).exists()
+        return job_id in self._memory_jobs
+
+# Job management
+JOBS_DIR = os.environ.get("JOBS_DIR")
+JOBS = JobManager(JOBS_DIR)
+
 # Determine device for API (env override takes precedence)
 ENV_DEVICE = os.environ.get("DEVICE") or os.environ.get("SELECTED_DEVICE")
-if ENV_DEVICE:
+if ENV_DEVICE and ENV_DEVICE.lower() != "auto":
     SELECTED_DEVICE = ENV_DEVICE
 else:
     try:

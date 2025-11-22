@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'music-split-api'
+    metrics_path: '/metrics'
+    scheme: 'https'
+    static_configs:
+      - targets: ['REPLACE_WITH_YOUR_API_URL_WITHOUT_HTTPS'] 
+    # Example: zac-music-split-api-fastapi-app.modal.run
