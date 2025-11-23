@@ -122,13 +122,12 @@ class MusicSeparator:
         
         # Sauvegarder chaque stem avec soundfile
         for i, name in enumerate(self.model_config["names"]):
-            # Save each stem as FLAC (lossless compression, ~50% smaller than WAV)
-            # OGG not supported by soundfile without additional dependencies
-            f = out / f"{name}.flac"
+            # Save each stem as OGG Vorbis (~10x smaller than WAV, ~5x smaller than FLAC)
+            f = out / f"{name}.ogg"
             audio_np = sources[i].cpu().numpy().T  # (samples, channels)
-            sf.write(str(f), audio_np, self.model.samplerate, format='FLAC')
+            sf.write(str(f), audio_np, self.model.samplerate, format='OGG', subtype='VORBIS')
             results[name] = str(f)
-            logger.info(f"  ✅ {name}.flac")
+            logger.info(f"  ✅ {name}.ogg")
         
         return results
     

@@ -73,8 +73,25 @@ from pathlib import Path
 
 
 # Process pool for CPU-bound separation tasks — created at lifespan startup
+# Process pool for CPU-bound separation tasks — created at lifespan startup
 _process_pool: Optional[ProcessPoolExecutor] = None
-_PROCESS_POOL_MAX_WORKERS = int(os.environ.get("PROCESS_POOL_WORKERS", "2"))
+_PROCESS_POOL_MAX_WORKERS = int(os.environ.get("PROCESS_POOL_WORKERS", "1")) # Force 1 worker for stability
+
+def _restart_process_pool():
+    """Restarts the process pool if it's broken."""
+    global _process_pool
+    logger.warning("♻️ Restarting Process Pool...")
+    try:
+        if _process_pool:
+            _process_pool.shutdown(wait=False)
+    except Exception:
+        pass
+    
+    try:
+        _process_pool = ProcessPoolExecutor(max_workers=_PROCESS_POOL_MAX_WORKERS)
+        logger.info("✅ Process Pool Restarted")
+    except Exception as e:
+        logger.error(f"❌ Failed to restart process pool: {e}")
 
 # Redis / Celery config
 REDIS_URL = os.environ.get("REDIS_URL", None)
@@ -720,6 +737,11 @@ async def separate_audio(
                 job["status"] = "error"
                 job["error"] = str(e)
                 separations_total.labels(model=model, status="error").inc()
+                
+                # Check for broken pool
+                if "process pool is not usable" in str(e).lower() or "terminated abruptly" in str(e).lower():
+                    logger.critical("🚨 Process Pool Broken! Triggering restart...")
+                    _restart_process_pool()
             finally:
                  try:
                     process_pool_busy.dec()
@@ -736,6 +758,10 @@ async def separate_audio(
         JOBS[job_id] = job
         
         # Check if process pool is available
+        # Check if process pool is available
+        if _process_pool is None:
+             _restart_process_pool()
+             
         if _process_pool is None:
             job["status"] = "error"
             job["error"] = "Process pool not initialized"
@@ -1009,8 +1035,8 @@ def mix_stems(req: MixRequest):
     try:
         for stem, volume in req.stems.items():
             if volume > 0:
-                # Look for FLAC files 
-                stem_path = session_path / f"{stem}.flac"
+                # Look for OGG files 
+                stem_path = session_path / f"{stem}.ogg"
                 if stem_path.exists():
                     data, sr = sf.read(str(stem_path))
                     
@@ -1040,13 +1066,13 @@ def mix_stems(req: MixRequest):
         if max_val > 1.0:
             mixed_audio = mixed_audio / max_val
 
-        output_mix = session_path / "mix.flac"
-        sf.write(str(output_mix), mixed_audio, sr)
+        output_mix = session_path / "mix.ogg"
+        sf.write(str(output_mix), mixed_audio, sr, format='OGG', subtype='VORBIS')
         
         return FileResponse(
             path=str(output_mix),
-            media_type="audio/flac",
-            filename="mix.flac"
+            media_type="audio/ogg",
+            filename="mix.ogg"
         )
 
     except HTTPException:
