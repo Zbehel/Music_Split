@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# Check if API_URL is set
+# Check if API_URL is set, otherwise use default
 if [ -z "$API_URL" ]; then
-    echo "WARNING: API_URL is not set. The frontend might not connect to the backend."
-    echo "Usage: API_URL=https://your-modal-app.modal.run ./deploy.sh"
+    API_URL="https://zbehel--music-split-api-fastapi-app.modal.run"
+    echo "ℹ️ Using default API_URL: $API_URL"
 fi
 
 # Navigate to web directory
-cd ../../web
+cd "$(dirname "$0")/../../web"
 
 # Install dependencies if needed
 if [ ! -d "node_modules" ]; then

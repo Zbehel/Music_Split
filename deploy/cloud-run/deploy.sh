@@ -36,38 +36,52 @@ else
 fi
 
 # 1. Build and Push Docker Image
-echo "📦 Building and Pushing Docker image..."
-gcloud builds submit --tag $FULL_IMAGE_NAME . --project=$PROJECT_ID
+if [ "$SKIP_API_DEPLOY" != "true" ]; then
+    echo "📦 Building and Pushing Docker image..."
+    gcloud builds submit --tag $FULL_IMAGE_NAME . --project=$PROJECT_ID
+else
+    echo "⏩ Skipping API image build (SKIP_API_DEPLOY=true)..."
+fi
 
 # 2. Deploy to Cloud Run
 # ====================================================
 # 1. DEPLOY API (Backend)
 # ====================================================
-echo "🚀 Deploying API to Cloud Run..."
 
-# Submit build to Cloud Build
-gcloud builds submit --tag $FULL_IMAGE_NAME .
+if [ "$SKIP_API_DEPLOY" = "true" ]; then
+    echo "⏩ Skipping API deployment (SKIP_API_DEPLOY=true)..."
+    if [ -z "$API_URL" ]; then
+        echo "❌ Error: API_URL must be set when skipping API deployment."
+        exit 1
+    fi
+    echo "ℹ️ Using provided API URL: $API_URL"
+else
+    echo "🚀 Deploying API to Cloud Run..."
 
-# Deploy to Cloud Run
-# Reduced max-instances to 2 to fit 40GB quota (2 * 16GB = 32GB)
-gcloud run deploy $SERVICE_NAME \
-  --image $FULL_IMAGE_NAME \
-  --platform managed \
-  --region $REGION \
-  --allow-unauthenticated \
-  --port 8000 \
-  --memory 16Gi \
-  --cpu 4 \
-  --no-cpu-throttling \
-  --min-instances 0 \
-  --max-instances 2 \
-  --set-env-vars=MAX_FILE_SIZE_MB=200,MAX_DURATION_SECONDS=900,METRICS_PUBLISH_INTERVAL=15,model_name=htdemucs_6s \
-  --gpu 1 \
-  --gpu-type nvidia-l4
+    # Submit build to Cloud Build
+    gcloud builds submit --tag $FULL_IMAGE_NAME .
 
-# Capture API URL
-API_URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')
-echo "✅ API Deployed at: $API_URL"
+    # Deploy to Cloud Run
+    # Reduced max-instances to 2 to fit 40GB quota (2 * 16GB = 32GB)
+    gcloud run deploy $SERVICE_NAME \
+      --image $FULL_IMAGE_NAME \
+      --platform managed \
+      --region $REGION \
+      --allow-unauthenticated \
+      --port 8000 \
+      --memory 16Gi \
+      --cpu 4 \
+      --no-cpu-throttling \
+      --min-instances 0 \
+      --max-instances 2 \
+      --set-env-vars=MAX_FILE_SIZE_MB=200,MAX_DURATION_SECONDS=900,METRICS_PUBLISH_INTERVAL=15,model_name=htdemucs_6s \
+      --gpu 1 \
+      --gpu-type nvidia-l4
+
+    # Capture API URL
+    API_URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')
+    echo "✅ API Deployed at: $API_URL"
+fi
 
 # ====================================================
 # 2. DEPLOY FRONTEND (React)

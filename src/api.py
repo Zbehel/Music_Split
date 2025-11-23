@@ -131,26 +131,35 @@ def _worker_separate(model_name: str, input_path: str, output_dir: str, device: 
 
 def download_youtube_audio(url: str, output_dir: Path) -> Path:
     """Downloads audio from YouTube URL to output_dir/input.wav"""
-    output_template = str(output_dir / "input.%(ext)s")
     
+    # Configuration yt-dlp optimisée pour éviter les blocages
     ydl_opts = {
         'format': 'bestaudio/best',
+        'outtmpl': str(output_dir / 'input.%(ext)s'), # Force fixed filename for predictability
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        # Use default client with cookies
+        # 'extractor_args': {
+        #     'youtube': {
+        #         'player_client': ['android', 'web'],
+        #     }
+        # },
+        # Postprocessor to convert to WAV
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'wav',
             'preferredquality': '192',
         }],
-        'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
-        # Use OAuth2 for authentication to bypass bot detection
-        'username': 'oauth2',
-        'password': '',
+        # Fallback to cookies if available
+        'cookiefile': '/data/youtube_cookies.txt' if Path('/data/youtube_cookies.txt').exists() else None,
+        'nocheckcertificate': True,
     }
     
-    # Check for cookies.txt in current directory or secrets
-    if os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = "cookies.txt"
+    if ydl_opts['cookiefile']:
+        logger.info("Using YouTube cookies for authentication")
+    else:
+        logger.warning("No YouTube cookies found - downloads may fail for restricted videos")
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -264,9 +273,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# GZip compression for faster downloads
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # Dossier temporaire pour les résultats
-TEMP_DIR = Path("/tmp/music-separator")
-TEMP_DIR.mkdir(exist_ok=True)
+# Use /data/sessions for persistent storage on Modal (mounted volume)
+# Falls back to /tmp/music-separator for local development
+TEMP_DIR = Path(os.environ.get("SESSIONS_DIR", "/data/sessions")) if os.environ.get("JOBS_DIR") else Path("/tmp/music-separator")
+TEMP_DIR.mkdir(exist_ok=True, parents=True)
 
 
 # ============================================================
@@ -446,11 +461,16 @@ def get_model_info(model_name: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+class MixRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}  # Allow 'model_' prefix
+    session_id: str
+    stems: Dict[str, float]  # stem_name -> volume (0.0 to 1.0)
+
 @app.post("/separate")
 async def separate_audio(
     request: Request,
     file: UploadFile = File(...),
-    model_name: str = Form(default="htdemucs_6s")
+    separation_model: str = Form(default="htdemucs_6s", alias="model_name")
 ):
     """
     Sépare un fichier audio en stems
@@ -489,14 +509,14 @@ async def separate_audio(
     logger.info(
         f"Separation request",
         extra={
-            "model": model_name,
+            "model": separation_model,
             "uploaded_filename": file.filename,
             "client_ip": client_ip
         }
     )
 
     # ✅ Check model exists
-    if model_name not in STEM_CONFIGS.keys():
+    if separation_model not in STEM_CONFIGS.keys():
         available = list(STEM_CONFIGS.keys())
         errors_total.labels(
             type="InvalidModel",
@@ -504,7 +524,7 @@ async def separate_audio(
         ).inc()
         raise HTTPException(
             status_code=400,
-            detail=f"Modèle '{model_name}' non disponible. "
+            detail=f"Modèle '{separation_model}' non disponible. "
                    f"Modèles disponibles: {available}"
         )
     # Respect circuit breaker state: reject new jobs if open
@@ -567,11 +587,11 @@ async def separate_audio(
         # Celery check
         if USE_CELERY and _redis_client is not None:
              from src.celery_app import celery
-             async_result = celery.send_task("src.tasks.separate_task", args=[model_name, str(input_file), str(output_dir), SELECTED_DEVICE])
+             async_result = celery.send_task("src.tasks.separate_task", args=[separation_model, str(input_file), str(output_dir), SELECTED_DEVICE])
              job_id = async_result.id
              JOBS[job_id] = {
                 "status": "pending",
-                "model": model_name,
+                "model": separation_model,
                 "device": SELECTED_DEVICE,
                 "session_id": temp_path.name,
                 "submitted_at": now_ts,
@@ -599,7 +619,7 @@ async def separate_audio(
         job_id = uuid.uuid4().hex
         JOBS[job_id] = {
             "status": "pending",
-            "model": model_name,
+            "model": separation_model,
             "device": SELECTED_DEVICE,
             "session_id": temp_path.name,
             "submitted_at": now_ts,
@@ -612,32 +632,56 @@ async def separate_audio(
             "source": "upload"
         }
 
-        def _on_done(fut, job_id=job_id, model=model_name):
-            JOBS[job_id]["finished_at"] = time.time()
+        def _on_done(fut, job_id=job_id, model=separation_model):
+            # Reload job to get latest state
+            job = JOBS.get(job_id)
+            if not job:
+                return
+
+            job["finished_at"] = time.time()
             try:
                 res = fut.result()
-                JOBS[job_id]["status"] = "done"
-                JOBS[job_id]["result"] = res
+                job["status"] = "done"
+                job["result"] = res
                 separations_total.labels(model=model, status="success").inc()
             except Exception as e:
-                JOBS[job_id]["status"] = "error"
-                JOBS[job_id]["error"] = str(e)
+                job["status"] = "error"
+                job["error"] = str(e)
                 separations_total.labels(model=model, status="error").inc()
             finally:
                  try:
                     process_pool_busy.dec()
                     running_jobs.dec()
                  except: pass
+            
+            # Explicitly save back to trigger persistence
+            JOBS[job_id] = job
 
-        JOBS[job_id]["status"] = "running"
-        JOBS[job_id]["started_at"] = time.time()
+        # Update job status to running and persist
+        job = JOBS[job_id]
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        JOBS[job_id] = job
+        
+        # Check if process pool is available
+        if _process_pool is None:
+            job["status"] = "error"
+            job["error"] = "Process pool not initialized"
+            JOBS[job_id] = job
+            shutil.rmtree(temp_path, ignore_errors=True)
+            raise HTTPException(status_code=503, detail="Server not ready - process pool unavailable")
+        
         try:
             process_pool_busy.inc()
             running_jobs.inc()
         except: pass
         
-        future = _process_pool.submit(_worker_separate, model_name, str(input_file), str(output_dir), SELECTED_DEVICE)
-        JOBS[job_id]["future"] = future
+        future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+        
+        # Attach future to memory copy (JobManager handles this)
+        job["future"] = future
+        JOBS[job_id] = job
+        
         future.add_done_callback(_on_done)
 
         return {
@@ -654,7 +698,57 @@ async def separate_audio(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/proxy/youtube-download")
+async def proxy_youtube_download(request: dict):
+    """Proxy endpoint to download YouTube audio using a community Cobalt instance"""
+    import httpx
+    
+    # List of community instances to try (in case one is down)
+    instances = [
+        "https://cobalt.meowing.de/api/json",
+        "https://api.cobalt.tools/api/json", # Official (might be down but worth keeping as backup)
+    ]
+    
+    # Cobalt API payload
+    payload = {
+        "url": request.get("url"),
+        "vCodec": "h264",
+        "vQuality": "720",
+        "aFormat": "mp3",
+        "isAudioOnly": True,
+        "filenamePattern": "basic"
+    }
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for instance_url in instances:
+            try:
+                response = await client.post(
+                    instance_url,
+                    json=payload,
+                    headers={
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                )
+                
+                data = response.json()
+                
+                if data.get('status') in ['redirect', 'stream']:
+                    return {
+                        "status": "ok",
+                        "url": data.get('url'),
+                        "title": data.get('filename', 'audio')
+                    }
+                
+            except Exception as e:
+                logger.warning(f"Failed to reach cobalt instance {instance_url}: {e}")
+                continue
+                
+    raise HTTPException(status_code=502, detail="Failed to download from all available Cobalt instances")
+
+
 class YouTubeRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}  # Allow 'model_' prefix
     url: str
     model_name: str = "htdemucs_6s"
 
@@ -678,8 +772,34 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
         raise HTTPException(status_code=400, detail=f"Invalid model: {yt_req.model_name}")
 
     # Create temp session
-    temp_session = tempfile.mkdtemp(dir=TEMP_DIR)
-    temp_path = Path(temp_session)
+    temp_path = TEMP_DIR / f"tmp{uuid.uuid4().hex[:12]}"
+    temp_path.mkdir(parents=True, exist_ok=True)
+    
+    # Cleanup old sessions (older than 1 hour)
+    try:
+        for session_dir in TEMP_DIR.iterdir():
+            if session_dir.is_dir():
+                age_seconds = time.time() - session_dir.stat().st_mtime
+                if age_seconds > 3600:  # 1 hour
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    logger.info(f"Cleaned up old session: {session_dir.name}")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup old sessions: {e}")
+    
+    # Cleanup old sessions from this client to save space
+    # Keep only the most recent 2 sessions per IP
+    try:
+        client_sessions = []
+        for session_dir in TEMP_DIR.iterdir():
+            if session_dir.is_dir():
+                # Check if this session belongs to this client by checking job metadata
+                # For simplicity, we'll just clean up old sessions (older than 1 hour)
+                age_seconds = time.time() - session_dir.stat().st_mtime
+                if age_seconds > 3600:  # 1 hour
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    logger.info(f"Cleaned up old session: {session_dir.name}")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup old sessions: {e}")
     output_dir = temp_path / "output"
     output_dir.mkdir(exist_ok=True)
 
@@ -744,32 +864,64 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
             "original_url": yt_req.url
         }
 
-        def _on_done(fut, job_id=job_id, model=yt_req.model_name):
-            JOBS[job_id]["finished_at"] = time.time()
+        def _on_done(fut, job_id=job_id, model=yt_req.model_name if 'yt_req' in locals() else model_name):
+            # Reload job to get latest state (though we are updating it)
+            job = JOBS.get(job_id)
+            if not job:
+                return
+
+            job["finished_at"] = time.time()
             try:
                 res = fut.result()
-                JOBS[job_id]["status"] = "done"
-                JOBS[job_id]["result"] = res
+                job["status"] = "done"
+                job["result"] = res
                 separations_total.labels(model=model, status="success").inc()
             except Exception as e:
-                JOBS[job_id]["status"] = "error"
-                JOBS[job_id]["error"] = str(e)
+                job["status"] = "error"
+                job["error"] = str(e)
                 separations_total.labels(model=model, status="error").inc()
             finally:
                  try:
                     process_pool_busy.dec()
                     running_jobs.dec()
                  except: pass
+            
+            # Explicitly save back to trigger persistence
+            JOBS[job_id] = job
 
-        JOBS[job_id]["status"] = "running"
-        JOBS[job_id]["started_at"] = time.time()
+        # Update job status to running and persist
+        job = JOBS[job_id]
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        JOBS[job_id] = job
+        
+        # Check if process pool is available
+        if _process_pool is None:
+            job["status"] = "error"
+            job["error"] = "Process pool not initialized"
+            JOBS[job_id] = job
+            shutil.rmtree(temp_path, ignore_errors=True)
+            raise HTTPException(status_code=503, detail="Server not ready - process pool unavailable")
+        
         try:
             process_pool_busy.inc()
             running_jobs.inc()
         except: pass
         
         future = _process_pool.submit(_worker_separate, yt_req.model_name, str(input_file), str(output_dir), SELECTED_DEVICE)
-        JOBS[job_id]["future"] = future
+        # Future cannot be persisted, but we keep it in memory dict via JobManager (it handles this)
+        # Wait, JobManager.__setitem__ removes 'future' before saving to disk, but keeps it in memory!
+        # So we can just set it on the dict in memory?
+        # No, JOBS[job_id] returns a COPY if from disk.
+        # If we want to attach future, we need to attach it to the memory copy?
+        # JobManager logic:
+        # __getitem__ checks disk. If found, returns loaded dict.
+        # __setitem__ saves to disk AND updates _memory_jobs.
+        
+        # So:
+        job["future"] = future
+        JOBS[job_id] = job
+        
         future.add_done_callback(_on_done)
 
         return {
@@ -805,29 +957,30 @@ def mix_stems(req: MixRequest):
     import numpy as np
     
     try:
-        for stem_name, volume in req.stems.items():
-            stem_path = session_path / f"{stem_name}.wav"
-            if stem_path.exists() and volume > 0:
-                data, rate = sf.read(str(stem_path), always_2d=True)
-                sr = rate
-                
-                # Apply volume
-                data = data * volume
-                
-                if mixed_audio is None:
-                    mixed_audio = data
-                else:
-                    # Ensure lengths match (pad if needed)
-                    if len(data) > len(mixed_audio):
-                        # Pad mixed
-                        pad = np.zeros((len(data) - len(mixed_audio), mixed_audio.shape[1]))
-                        mixed_audio = np.vstack((mixed_audio, pad))
-                    elif len(data) < len(mixed_audio):
-                        # Pad data
-                        pad = np.zeros((len(mixed_audio) - len(data), data.shape[1]))
-                        data = np.vstack((data, pad))
+        for stem, volume in req.stems.items():
+            if volume > 0:
+                # Look for FLAC files 
+                stem_path = session_path / f"{stem}.flac"
+                if stem_path.exists():
+                    data, sr = sf.read(str(stem_path))
                     
-                    mixed_audio += data
+                    # Apply volume
+                    data = data * volume
+                    
+                    if mixed_audio is None:
+                        mixed_audio = data
+                    else:
+                        # Ensure lengths match (pad if needed)
+                        if len(data) > len(mixed_audio):
+                            # Pad mixed
+                            pad = np.zeros((len(data) - len(mixed_audio), mixed_audio.shape[1]))
+                            mixed_audio = np.vstack((mixed_audio, pad))
+                        elif len(data) < len(mixed_audio):
+                            # Pad data
+                            pad = np.zeros((len(mixed_audio) - len(data), data.shape[1]))
+                            data = np.vstack((data, pad))
+                        
+                        mixed_audio += data
         
         if mixed_audio is None:
              raise HTTPException(status_code=400, detail="No stems selected or found")
@@ -837,15 +990,17 @@ def mix_stems(req: MixRequest):
         if max_val > 1.0:
             mixed_audio = mixed_audio / max_val
 
-        output_mix = session_path / "mix.wav"
+        output_mix = session_path / "mix.flac"
         sf.write(str(output_mix), mixed_audio, sr)
         
         return FileResponse(
             path=str(output_mix),
-            media_type="audio/wav",
-            filename="mix.wav"
+            media_type="audio/flac",
+            filename="mix.flac"
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Mixing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -857,7 +1012,7 @@ def download_stem(session_id: str, stem_name: str):
     """
     Télécharge un stem spécifique
     """
-    file_path = TEMP_DIR / session_id / "output" / f"{stem_name}.wav"
+    file_path = TEMP_DIR / session_id / "output" / f"{stem_name}.flac"
     
     if not file_path.exists():
         logger.warning(
@@ -866,7 +1021,7 @@ def download_stem(session_id: str, stem_name: str):
         )
         raise HTTPException(
             status_code=404,
-            detail=f"Fichier {stem_name}.wav non trouvé pour session {session_id}"
+            detail=f"Fichier {stem_name}.flac non trouvé pour session {session_id}"
         )
     
     logger.info(
@@ -876,8 +1031,8 @@ def download_stem(session_id: str, stem_name: str):
     
     return FileResponse(
         path=str(file_path),
-        media_type="audio/wav",
-        filename=f"{stem_name}.wav"
+        media_type="audio/flac",
+        filename=f"{stem_name}.flac"
     )
 
 
@@ -1078,6 +1233,26 @@ async def lifespan(app: FastAPI):
                     models_loaded.set(len(loaded))
                 except Exception:
                     logger.debug("Could not update models_loaded in metrics loop")
+                
+                # Update pending jobs metric
+                try:
+                    # Count jobs with status 'pending' or 'processing'
+                    # Note: This iterates over all jobs, which might be slow if many jobs.
+                    # In JobManager, we might need a more efficient way if persistence is huge.
+                    # For now, we assume reasonable number of active jobs.
+                    pending_count = 0
+                    running_count = 0
+                    
+                    # If using file persistence, we can't easily iterate all without listing files.
+                    # If using memory, we can.
+                    # Let's just check memory jobs for now as a proxy for "active" jobs on this instance.
+                    # Or better, if JobManager has a method to list active.
+                    
+                    # Since we can't easily list all files in JobManager without adding a method,
+                    # we will skip this for file-based persistence for now to avoid I/O storm.
+                    pass
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Error updating metrics in background thread: {e}")
             _metrics_stop_event.wait(_METRICS_INTERVAL)
@@ -1089,8 +1264,13 @@ async def lifespan(app: FastAPI):
 
     # Create process pool for CPU-bound separation tasks
     try:
+        # CRITICAL: Set spawn method for CUDA compatibility
+        # Fork doesn't work with CUDA - must use spawn
+        import multiprocessing
+        multiprocessing.set_start_method('spawn', force=True)
+        
         _process_pool = ProcessPoolExecutor(max_workers=_PROCESS_POOL_MAX_WORKERS)
-        logger.info(f"ProcessPoolExecutor started with {_PROCESS_POOL_MAX_WORKERS} workers")
+        logger.info(f"ProcessPoolExecutor started with {_PROCESS_POOL_MAX_WORKERS} workers (spawn method)")
         try:
             process_pool_workers.set(_PROCESS_POOL_MAX_WORKERS)
         except Exception:

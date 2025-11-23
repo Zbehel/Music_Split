@@ -26,7 +26,7 @@ jobs_volume = modal.Volume.from_name("music-split-jobs-data", create_if_missing=
         "/root/.cache/torch": torch_volume,
         "/data": jobs_volume
     },
-    env={"JOBS_DIR": "/data/jobs"},
+    env={"JOBS_DIR": "/data/jobs", "SESSIONS_DIR": "/data/sessions"},
     max_containers=1,
     secrets=[modal.Secret.from_dotenv()] # Load env vars
 )
