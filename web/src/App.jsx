@@ -59,6 +59,31 @@ function App() {
       });
   }, []);
 
+  // Cleanup when user closes window
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // Call cleanup endpoint (use sendBeacon for reliability)
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(`${API_URL}/cleanup-on-exit`);
+      } else {
+        // Fallback for browsers without sendBeacon
+        try {
+          axios.post(`${API_URL}/cleanup-on-exit`);
+        } catch (e) {
+          // Ignore errors on exit
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      // Also cleanup on component unmount
+      handleBeforeUnload();
+    };
+  }, []);
+
   const resetState = () => {
     setStatus('idle');
     setErrorMsg('');

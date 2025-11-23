@@ -33,16 +33,13 @@ jobs:
           python-version: "3.11"
       - name: Install Modal
         run: pip install modal
-      - name: Deploy to Modal
+      - name: Deploy to Modal (Production)
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          modal setup
-          modal deploy deploy/modal/modal_app.py
-          # Capture the URL for the frontend build
-          # Note: This assumes the URL is predictable or we need to fetch it.
-          # For now, we'll assume the user sets the API_URL in Cloudflare secrets or we use a fixed URL.
+          modal token set --token-id $MODAL_TOKEN_ID --token-secret $MODAL_TOKEN_SECRET
+          modal deploy --env prod deploy/modal/modal_app.py
           
   deploy-frontend:
     name: Deploy Frontend to Cloudflare
