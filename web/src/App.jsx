@@ -59,16 +59,26 @@ function App() {
       });
   }, []);
 
+  const resetState = () => {
+    setStatus('idle');
+    setErrorMsg('');
+    setStems([]);
+    setJobId(null);
+    setProgress(0);
+    setSessionId(null);
+    // Don't clear originalSourceUrl here as it might be set immediately after for local preview
+  };
+
   const handleUpload = async () => {
     if (!file) return;
+
+    resetState();
 
     // Immediate local playback for upload
     const localUrl = URL.createObjectURL(file);
     setOriginalSourceUrl(localUrl);
 
     setStatus('uploading');
-    setErrorMsg('');
-    setStems([]); // Clear previous stems
 
     const formData = new FormData();
     formData.append('file', file);
@@ -86,21 +96,23 @@ function App() {
 
   const handleYoutube = async () => {
     if (!ytUrl) return;
+
+    resetState();
+    setOriginalSourceUrl(null);
     setStatus('processing');
-    setErrorMsg('');
-    setStems([]);
-    setOriginalSourceUrl(null); // Reset for new YouTube link
 
     try {
+      // Use backend's yt-dlp with cookies (most reliable method)
       const res = await axios.post(`${API_URL}/separate/youtube`, {
         url: ytUrl,
         model_name: selectedModel
       });
+
       startPolling(res.data.job_id);
     } catch (e) {
-      console.error(e);
+      console.error('YouTube processing error:', e);
       setStatus('error');
-      setErrorMsg(e.response?.data?.detail || "YouTube processing failed");
+      setErrorMsg(e.response?.data?.detail || e.message || "YouTube processing failed");
     }
   };
 
@@ -148,9 +160,31 @@ function App() {
           const stemList = Object.keys(resultStems).map(name => ({
             name,
             url: `${API_URL}/download/${res.data.session_id}/${name}`,
+            color: STEM_COLORS[name] || '#888',
             isOriginal: false
           }));
-          setStems(stemList);
+
+          // Keep showing progress while stems download
+          setProgress(95);
+          setStatus('processing'); // Keep in processing state
+
+          // Preload all audio files in parallel for faster playback
+          const audioPromises = stemList.map(stem => {
+            return new Promise((resolve) => {
+              const audio = new Audio(stem.url);
+              audio.addEventListener('canplaythrough', () => resolve(audio), { once: true });
+              audio.addEventListener('error', () => resolve(null), { once: true });
+              audio.load();
+            });
+          });
+
+          // Wait for all stems to be ready, then show them
+          Promise.all(audioPromises).then(() => {
+            console.log('All stems preloaded');
+            setProgress(100);
+            setStatus('done');
+            setStems(stemList);
+          });
 
         } else if (res.data.status === 'error') {
           clearInterval(interval);
@@ -159,9 +193,12 @@ function App() {
           setErrorMsg(res.data.error || "Processing failed");
         }
       } catch (e) {
-        // Ignore polling errors
+        // Ignore 404s during startup
+        if (e.response && e.response.status !== 404) {
+          console.error("Polling error", e);
+        }
       }
-    }, 2000);
+    }, 5000); // Poll every 5 seconds
   };
 
   const handleMixDownload = async () => {
@@ -179,7 +216,7 @@ function App() {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', 'mix.wav');
+      link.setAttribute('download', 'mix.flac');
       document.body.appendChild(link);
       link.click();
     } catch (e) {
@@ -196,10 +233,10 @@ function App() {
   };
 
   return (
-    <div className="flex h-screen w-screen bg-[#0f172a] text-white overflow-hidden font-sans">
+    <div className="flex flex-col md:flex-row min-h-screen md:h-screen w-screen bg-[#0f172a] text-white md:overflow-hidden font-sans">
 
       {/* SIDEBAR - Controls */}
-      <div className="w-80 flex-shrink-0 bg-slate-900/50 border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto backdrop-blur-md z-20">
+      <div className="w-full md:w-80 h-auto md:h-full flex-shrink-0 bg-slate-900/50 border-b md:border-b-0 md:border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto backdrop-blur-md z-20">
         {/* Header */}
         <div className="flex items-center gap-3 mb-2">
           <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
@@ -306,7 +343,7 @@ function App() {
       </div>
 
       {/* MAIN CONTENT - Player Dashboard */}
-      <div className="flex-1 flex flex-col relative overflow-hidden">
+      <div className="flex-1 flex flex-col relative md:overflow-hidden">
         {/* Background Gradients */}
         <div className="absolute inset-0 pointer-events-none">
           <div className="absolute top-[-20%] right-[-10%] w-[60%] h-[60%] bg-indigo-600/10 rounded-full blur-[150px]" />
@@ -386,7 +423,7 @@ function App() {
         </div>
 
         {/* Bottom Section: Stems Grid */}
-        <div className="flex-1 p-8 overflow-y-auto bg-slate-900/30">
+        <div className="flex-1 p-8 md:overflow-y-auto bg-slate-900/30">
           {stems.length > 0 ? (
             <div className="w-full grid gap-3 pb-20">
               {stems.map((stem) => (
