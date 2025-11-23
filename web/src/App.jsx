@@ -243,7 +243,7 @@ function AppContent() {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', 'mix.flac');
+      link.setAttribute('download', 'mix.ogg');
       document.body.appendChild(link);
       link.click();
     } catch (e) {
@@ -469,6 +469,7 @@ function AppContent() {
                       }
                     }}
                     src={stem.url}
+                    type="audio/ogg"
                     preload="auto"
                     crossOrigin="anonymous"
                   />
