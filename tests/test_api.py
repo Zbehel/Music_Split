@@ -225,3 +225,26 @@ class TestCircuitBreaker:
         
         # Should return 503 when circuit breaker is open
         assert response.status_code == 503 or response.status_code == 500
+
+
+class TestCleanupEndpoints:
+    """Test cleanup-related endpoints"""
+    
+    def test_cleanup_on_exit_endpoint(self, client):
+        """Test cleanup-on-exit endpoint"""
+        response = client.post("/cleanup-on-exit")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert "sessions_cleaned" in data
+        assert "models_cleared" in data
+        assert isinstance(data["sessions_cleaned"], int)
+        assert isinstance(data["models_cleared"], bool)
+    
+    def test_cleanup_on_exit_returns_counts(self, client):
+        """Test that cleanup-on-exit returns proper counts"""
+        response = client.post("/cleanup-on-exit")
+        assert response.status_code == 200
+        data = response.json()
+        # Should return non-negative counts
+        assert data["sessions_cleaned"] >= 0

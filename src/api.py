@@ -36,6 +36,33 @@ import subprocess
 
 
 
+# Custom FileResponse that disables range request support
+class NoRangeFileResponse(FileResponse):
+    """
+    FileResponse that disables HTTP range request support.
+    This ensures clients always receive the complete file (200 OK)
+    instead of partial content (206 Partial Content).
+    """
+    async def __call__(self, scope, receive, send):
+        # Remove Range header from request to prevent partial content
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            # Remove range header if present
+            headers_to_remove = [b"range", b"Range"]
+            scope["headers"] = [
+                (name, value) for name, value in scope.get("headers", [])
+                if name not in headers_to_remove
+            ]
+        
+        # Call parent with modified scope
+        await super().__call__(scope, receive, send)
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set Accept-Ranges header to indicate we don't support range requests
+        self.headers["Accept-Ranges"] = "none"
+
+
 # Background metrics updater
 _metrics_stop_event = threading.Event()
 _metrics_thread: Optional[threading.Thread] = None
@@ -128,6 +155,46 @@ def _worker_separate(model_name: str, input_path: str, output_dir: str, device: 
 
     separator = MusicSeparator(model_name=model_name, device=device)
     return separator.separate(str(input_path), str(output_dir))
+
+def cleanup_old_sessions(max_age_seconds: int = 3600, max_to_check: int = 50):
+    """
+    Clean up old session directories (limited to prevent slowdown).
+    
+    Args:
+        max_age_seconds: Delete sessions older than this (default 1 hour)
+        max_to_check: Maximum number of sessions to check per call
+    
+    Returns:
+        Number of sessions cleaned
+    """
+    try:
+        sessions = list(TEMP_DIR.iterdir())
+        # Sort by modification time, oldest first
+        sessions.sort(key=lambda p: p.stat().st_mtime if p.is_dir() else 0)
+        
+        cleaned = 0
+        checked = 0
+        now = time.time()
+        
+        for session_dir in sessions:
+            if checked >= max_to_check:
+                break
+            
+            if session_dir.is_dir():
+                checked += 1
+                age_seconds = now - session_dir.stat().st_mtime
+                if age_seconds > max_age_seconds:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    cleaned += 1
+                    logger.debug(f"Cleaned up old session: {session_dir.name}")
+        
+        if cleaned > 0:
+            logger.info(f"Cleanup removed {cleaned} old sessions (checked {checked})")
+        return cleaned
+    except Exception as e:
+        logger.warning(f"Failed to cleanup old sessions: {e}")
+        return 0
+
 
 def download_youtube_audio(url: str, output_dir: Path) -> Path:
     """Downloads audio from YouTube URL to output_dir/input.wav"""
@@ -225,6 +292,11 @@ class JobManager:
             return self[job_id]
         except KeyError:
             return default
+    
+    def values(self):
+        """Return all job values (for iteration)"""
+        # Return jobs from memory (includes both persisted and non-persisted)
+        return self._memory_jobs.values()
 
     def __contains__(self, job_id: str):
         if self.persistence_dir:
@@ -775,31 +847,9 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
     temp_path = TEMP_DIR / f"tmp{uuid.uuid4().hex[:12]}"
     temp_path.mkdir(parents=True, exist_ok=True)
     
-    # Cleanup old sessions (older than 1 hour)
-    try:
-        for session_dir in TEMP_DIR.iterdir():
-            if session_dir.is_dir():
-                age_seconds = time.time() - session_dir.stat().st_mtime
-                if age_seconds > 3600:  # 1 hour
-                    shutil.rmtree(session_dir, ignore_errors=True)
-                    logger.info(f"Cleaned up old session: {session_dir.name}")
-    except Exception as e:
-        logger.warning(f"Failed to cleanup old sessions: {e}")
+    # Cleanup old sessions (limited to prevent slowdown)
+    cleanup_old_sessions(max_age_seconds=3600, max_to_check=20)
     
-    # Cleanup old sessions from this client to save space
-    # Keep only the most recent 2 sessions per IP
-    try:
-        client_sessions = []
-        for session_dir in TEMP_DIR.iterdir():
-            if session_dir.is_dir():
-                # Check if this session belongs to this client by checking job metadata
-                # For simplicity, we'll just clean up old sessions (older than 1 hour)
-                age_seconds = time.time() - session_dir.stat().st_mtime
-                if age_seconds > 3600:  # 1 hour
-                    shutil.rmtree(session_dir, ignore_errors=True)
-                    logger.info(f"Cleaned up old session: {session_dir.name}")
-    except Exception as e:
-        logger.warning(f"Failed to cleanup old sessions: {e}")
     output_dir = temp_path / "output"
     output_dir.mkdir(exist_ok=True)
 
@@ -1029,7 +1079,7 @@ def download_stem(session_id: str, stem_name: str):
         extra={"session_id": session_id, "stem_name": stem_name}
     )
     
-    return FileResponse(
+    return NoRangeFileResponse(
         path=str(file_path),
         media_type="audio/flac",
         filename=f"{stem_name}.flac"
@@ -1058,7 +1108,7 @@ def download_original(session_id: str):
         extra={"session_id": session_id}
     )
     
-    return FileResponse(
+    return NoRangeFileResponse(
         path=str(file_path),
         media_type="audio/wav",
         filename="original.wav"
@@ -1135,7 +1185,7 @@ def download_by_job(job_id: str, stem_name: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Stem not found for job")
 
-    return FileResponse(path=str(file_path), media_type="audio/wav", filename=f"{stem_name}.wav")
+    return NoRangeFileResponse(path=str(file_path), media_type="audio/wav", filename=f"{stem_name}.wav")
 
 
 @app.post("/clear-cache")
@@ -1168,6 +1218,38 @@ def cleanup_session(session_id: str):
             status_code=404,
             detail=f"Session {session_id} non trouvée"
         )
+
+
+
+
+@app.post("/cleanup-on-exit")
+def cleanup_on_exit():
+    """
+    Cleanup endpoint called when user closes the window.
+    Performs more aggressive cleanup since user is leaving.
+    """
+    try:
+        # Clean older sessions (2+ hours old) and check more
+        cleaned = cleanup_old_sessions(max_age_seconds=7200, max_to_check=100)
+        
+        # Optionally clear model cache if no active jobs
+        active_jobs = sum(1 for job in JOBS.values() if job.get("status") in ["pending", "running"])
+        models_cleared = False
+        if active_jobs == 0:
+            loaded = list(get_separator.__globals__.get('_loaded_models', {}).keys())
+            if len(loaded) > 0:
+                logger.info(f"Clearing model cache on exit ({len(loaded)} models)")
+                clear_cache()
+                models_cleared = True
+        
+        return {
+            "status": "success",
+            "sessions_cleaned": cleaned,
+            "models_cleared": models_cleared
+        }
+    except Exception as e:
+        logger.error(f"Cleanup on exit failed: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 @app.post("/cleanup-all")
