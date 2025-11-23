@@ -1062,7 +1062,14 @@ def download_stem(session_id: str, stem_name: str):
     """
     Télécharge un stem spécifique
     """
-    file_path = TEMP_DIR / session_id / "output" / f"{stem_name}.flac"
+    # Handle stem_name with or without extension
+    clean_name = stem_name
+    if clean_name.endswith(".ogg"):
+        clean_name = clean_name[:-4]
+        
+    file_path = TEMP_DIR / session_id / "output" / f"{clean_name}.ogg"
+    media_type = "audio/ogg"
+    filename = f"{clean_name}.ogg"
     
     if not file_path.exists():
         logger.warning(
