@@ -19,7 +19,7 @@ jobs_volume = modal.Volume.from_name("music-split-jobs-data", create_if_missing=
 
 @app.function(
     image=image,
-    gpu="T4", # Use T4 for cost effectiveness, or A10G for speed
+    gpu="T4", 
     timeout=600, # 10 minutes
     volumes={
         "/root/.cache/huggingface": hf_volume,

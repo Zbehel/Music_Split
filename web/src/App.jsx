@@ -26,19 +26,13 @@ function App() {
   const [sessionId, setSessionId] = useState(null);
   const [progress, setProgress] = useState(0);
   const [audioElements, setAudioElements] = useState({}); // { name: element }
+
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState('htdemucs_6s');
   const [errorMsg, setErrorMsg] = useState('');
 
   // Audio Sync Hook
   const {
-    isPlaying,
-    currentTime,
-    duration,
-    volumes,
-    muted,
-    togglePlay,
-    seek,
     setVolume,
     toggleMute,
     registerAudio
@@ -58,6 +52,112 @@ function App() {
         setErrorMsg("Failed to connect to API.");
       });
   }, []);
+
+  // Poll for status
+  useEffect(() => {
+    let interval;
+    let progressInterval;
+
+    if (status === 'processing' && jobId) {
+      progressInterval = setInterval(() => {
+        setProgress(prev => {
+          if (prev >= 90) return prev;
+          const increment = prev < 50 ? 5 : prev < 80 ? 2 : 0.5;
+          return prev + increment;
+        });
+      }, 1000);
+
+      interval = setInterval(async () => {
+        try {
+          const res = await axios.get(`${API_URL}/status/${jobId}`);
+
+          // Set original source as soon as session ID is available (for YouTube)
+          if (res.data.session_id) {
+            setOriginalSourceUrl(prev => {
+              // Only set if not already set and mode is youtube
+              if (!prev && mode === 'youtube') {
+                return `${API_URL}/download/${res.data.session_id}/original`;
+              }
+              return prev;
+            });
+          }
+
+          if (res.data.status === 'done') {
+            clearInterval(interval);
+            clearInterval(progressInterval);
+            setProgress(100);
+            setStatus('done');
+            setSessionId(res.data.session_id);
+
+            // Ensure original source is set for YouTube mode
+            if (mode === 'youtube' && res.data.session_id) {
+              setOriginalSourceUrl(`${API_URL}/download/${res.data.session_id}/original`);
+            }
+
+            // Process stems
+            const resultStems = res.data.result;
+            console.log('Separation complete:', { sessionId: res.data.session_id, stems: Object.keys(resultStems) });
+
+            const stemList = Object.keys(resultStems).map(name => ({
+              name,
+              url: `${API_URL}/download/${res.data.session_id}/${name}`, // Remove .ogg, let backend handle it
+              color: STEM_COLORS[name] || '#888',
+              isOriginal: false
+            }));
+
+            console.log('Generated stem URLs:', stemList.map(s => ({ name: s.name, url: s.url })));
+
+            // Show stems immediately for better UX
+            setStems(stemList);
+
+            // Preload audio in background (optional, for faster playback)
+            // Don't block UI on this
+            const audioPromises = stemList.map(stem => {
+              return new Promise((resolve) => {
+                const audio = new Audio(stem.url);
+                const timeout = setTimeout(() => resolve(null), 10000); // 10s timeout
+
+                audio.addEventListener('canplaythrough', () => {
+                  clearTimeout(timeout);
+                  resolve(audio);
+                }, { once: true });
+
+                audio.addEventListener('error', () => {
+                  clearTimeout(timeout);
+                  resolve(null);
+                }, { once: true });
+
+                audio.load();
+              });
+            });
+
+            // Log when preloading completes (non-blocking)
+            Promise.all(audioPromises).then(() => {
+              console.log('Audio preloading completed');
+            }).catch(err => {
+              console.warn('Audio preload failed:', err);
+            });
+
+          } else if (res.data.status === 'error') {
+            clearInterval(interval);
+            clearInterval(progressInterval);
+            setStatus('error');
+            setErrorMsg(res.data.error || "Processing failed");
+          }
+        } catch (e) {
+          // Ignore 404s during startup
+          if (e.response && e.response.status !== 404) {
+            console.error("Polling error", e);
+          }
+        }
+      }, 5000); // Poll every 5 seconds
+    }
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(progressInterval);
+    };
+  }, [status, jobId, mode]); // Dependencies for useEffect
 
   // Cleanup when user closes window
   useEffect(() => {
@@ -79,8 +179,8 @@ function App() {
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      // Also cleanup on component unmount
-      handleBeforeUnload();
+      // DON'T call handleBeforeUnload here - it causes stems to disappear on re-render!
+      // Cleanup only happens on actual window close via beforeunload event
     };
   }, []);
 
@@ -182,33 +282,48 @@ function App() {
           }
 
           const resultStems = res.data.result;
+          console.log('Separation complete:', { sessionId: res.data.session_id, stems: Object.keys(resultStems) });
+
           const stemList = Object.keys(resultStems).map(name => ({
             name,
-            url: `${API_URL}/download/${res.data.session_id}/${name}`,
+            url: `${API_URL}/download/${res.data.session_id}/${name}.ogg`, // Use OGG
             color: STEM_COLORS[name] || '#888',
             isOriginal: false
           }));
 
-          // Keep showing progress while stems download
-          setProgress(95);
-          setStatus('processing'); // Keep in processing state
+          console.log('Generated stem URLs:', stemList.map(s => ({ name: s.name, url: s.url })));
 
-          // Preload all audio files in parallel for faster playback
+          // Show stems immediately for better UX
+          setProgress(100);
+          setStatus('done');
+          setStems(stemList);
+
+          // Preload audio in background (optional, for faster playback)
+          // Don't block UI on this
           const audioPromises = stemList.map(stem => {
             return new Promise((resolve) => {
               const audio = new Audio(stem.url);
-              audio.addEventListener('canplaythrough', () => resolve(audio), { once: true });
-              audio.addEventListener('error', () => resolve(null), { once: true });
+              const timeout = setTimeout(() => resolve(null), 10000); // 10s timeout
+
+              audio.addEventListener('canplaythrough', () => {
+                clearTimeout(timeout);
+                resolve(audio);
+              }, { once: true });
+
+              audio.addEventListener('error', () => {
+                clearTimeout(timeout);
+                resolve(null);
+              }, { once: true });
+
               audio.load();
             });
           });
 
-          // Wait for all stems to be ready, then show them
+          // Log when preloading completes (non-blocking)
           Promise.all(audioPromises).then(() => {
-            console.log('All stems preloaded');
-            setProgress(100);
-            setStatus('done');
-            setStems(stemList);
+            console.log('Audio preloading completed');
+          }).catch(err => {
+            console.warn('Audio preload failed:', err);
           });
 
         } else if (res.data.status === 'error') {
@@ -509,7 +624,7 @@ function App() {
                   <div className="flex-1 h-[40px] flex items-center justify-center bg-slate-900/50 rounded-lg border border-white/5">
                     <Spectrum
                       audioNode={audioElements[stem.name]}
-                      color={STEM_COLORS[stem.name] || '#cbd5e1'}
+                      color={stem.color}
                     />
                   </div>
 

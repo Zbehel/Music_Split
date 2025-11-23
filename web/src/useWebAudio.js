@@ -9,22 +9,19 @@ export function useWebAudio(stems) {
     const [isLoading, setIsLoading] = useState(false);
     const [loadingProgress, setLoadingProgress] = useState(0);
 
-    // Audio Context and Nodes
     const audioContextRef = useRef(null);
-    const sourceNodesRef = useRef({}); // stem_name -> AudioBufferSourceNode
-    const gainNodesRef = useRef({});   // stem_name -> GainNode
-    const buffersRef = useRef({});     // stem_name -> AudioBuffer
-
-    // Playback State
-    const startTimeRef = useRef(0);    // When playback started (context time)
-    const pauseTimeRef = useRef(0);    // Where we paused (offset)
+    const gainNodesRef = useRef({});
+    const analyzerNodesRef = useRef({});
+    const sourceNodesRef = useRef({});
+    const audioBuffersRef = useRef({});
+    const startTimeRef = useRef(0);
+    const pauseTimeRef = useRef(0);
     const rafRef = useRef(null);
 
-    // Initialize Audio Context
+    // Initialize AudioContext
     useEffect(() => {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         audioContextRef.current = new AudioContext();
-
         return () => {
             if (audioContextRef.current) {
                 audioContextRef.current.close();
@@ -33,50 +30,67 @@ export function useWebAudio(stems) {
         };
     }, []);
 
-    // Load Stems
+    // Load and decode audio files
     useEffect(() => {
-        if (!stems || stems.length === 0) return;
+        if (!stems || stems.length === 0 || !audioContextRef.current) return;
 
         const loadStems = async () => {
             setIsLoading(true);
             setLoadingProgress(0);
-            setIsPlaying(false);
+
+            // Stop any current playback
+            stop();
+
+            // Reset state
+            audioBuffersRef.current = {};
+            gainNodesRef.current = {};
+            analyzerNodesRef.current = {};
+            setVolumes({});
+            setMuted({});
             pauseTimeRef.current = 0;
-
-            // Stop any existing playback
-            stopAllSources();
-
-            // Reset buffers
-            buffersRef.current = {};
-
-            // Initialize volumes/muted state
-            const newVolumes = {};
-            const newMuted = {};
-            stems.forEach(stem => {
-                newVolumes[stem.name] = 1.0;
-                newMuted[stem.name] = false;
-            });
-            setVolumes(newVolumes);
-            setMuted(newMuted);
+            setCurrentTime(0);
 
             let loadedCount = 0;
-            const total = stems.length;
+            const totalStems = stems.length;
 
             try {
                 await Promise.all(stems.map(async (stem) => {
-                    const response = await fetch(stem.url);
-                    const arrayBuffer = await response.arrayBuffer();
-                    const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+                    try {
+                        const response = await fetch(stem.url);
+                        const arrayBuffer = await response.arrayBuffer();
+                        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
 
-                    buffersRef.current[stem.name] = audioBuffer;
+                        audioBuffersRef.current[stem.name] = audioBuffer;
 
-                    // Set duration from the first track (assuming all same length)
-                    if (loadedCount === 0) {
-                        setDuration(audioBuffer.duration);
+                        // Initialize volume state
+                        setVolumes(prev => ({ ...prev, [stem.name]: 1.0 }));
+                        setMuted(prev => ({ ...prev, [stem.name]: false }));
+
+                        // Create GainNode for this stem
+                        const gainNode = audioContextRef.current.createGain();
+
+                        // Create AnalyserNode for this stem
+                        const analyzer = audioContextRef.current.createAnalyser();
+                        analyzer.fftSize = 256;
+                        analyzerNodesRef.current[stem.name] = analyzer;
+
+                        // Connect: Source -> Analyser -> Gain -> Destination
+                        // Note: Source is connected in play()
+                        analyzer.connect(gainNode);
+                        gainNode.connect(audioContextRef.current.destination);
+
+                        gainNodesRef.current[stem.name] = gainNode;
+
+                        // Set duration from the first stem (assuming all are same length)
+                        if (stem.name === stems[0].name) {
+                            setDuration(audioBuffer.duration);
+                        }
+
+                        loadedCount++;
+                        setLoadingProgress((loadedCount / totalStems) * 100);
+                    } catch (err) {
+                        console.error(`Failed to load stem ${stem.name}:`, err);
                     }
-
-                    loadedCount++;
-                    setLoadingProgress(Math.round((loadedCount / total) * 100));
                 }));
             } catch (err) {
                 console.error("Error loading stems:", err);
@@ -88,140 +102,130 @@ export function useWebAudio(stems) {
         loadStems();
     }, [stems]);
 
-    const stopAllSources = () => {
-        Object.values(sourceNodesRef.current).forEach(node => {
-            try { node.stop(); } catch (e) { }
-            node.disconnect();
-        });
-        sourceNodesRef.current = {};
-
-        // Disconnect gains (optional, but cleaner)
-        Object.values(gainNodesRef.current).forEach(node => {
-            node.disconnect();
-        });
-        gainNodesRef.current = {};
-    };
-
     const play = useCallback(() => {
+        if (!audioContextRef.current || isLoading) return;
+
         if (audioContextRef.current.state === 'suspended') {
             audioContextRef.current.resume();
         }
 
         const ctx = audioContextRef.current;
         const startOffset = pauseTimeRef.current;
+        startTimeRef.current = ctx.currentTime - startOffset;
 
-        // Check if we are at the end
-        if (duration > 0 && startOffset >= duration - 0.1) {
-            pauseTimeRef.current = 0;
-        }
-
-        startTimeRef.current = ctx.currentTime - pauseTimeRef.current;
-
-        // Create and start sources
-        stems.forEach(stem => {
-            const buffer = buffersRef.current[stem.name];
-            if (!buffer) return;
-
+        // Create and start source nodes
+        Object.entries(audioBuffersRef.current).forEach(([name, buffer]) => {
             const source = ctx.createBufferSource();
             source.buffer = buffer;
 
-            const gain = ctx.createGain();
-            // Apply current volume/mute
-            const vol = muted[stem.name] ? 0 : (volumes[stem.name] ?? 1.0);
-            gain.gain.value = vol;
-
-            source.connect(gain);
-            gain.connect(ctx.destination);
-
-            source.start(0, pauseTimeRef.current);
-
-            // Store references
-            sourceNodesRef.current[stem.name] = source;
-            gainNodesRef.current[stem.name] = gain;
-
-            // Handle auto-stop at end (only need one listener)
-            if (stem.name === stems[0].name) {
-                source.onended = () => {
-                    // Check if we actually reached the end (vs just paused)
-                    // This is tricky with Web Audio, so we rely on the UI loop for "ended" state
-                };
+            // Connect to analyzer node (which connects to gain -> destination)
+            if (analyzerNodesRef.current[name]) {
+                source.connect(analyzerNodesRef.current[name]);
+            } else if (gainNodesRef.current[name]) {
+                // Fallback direct to gain if no analyzer
+                source.connect(gainNodesRef.current[name]);
             }
+
+            source.start(0, startOffset);
+            sourceNodesRef.current[name] = source;
+
+            // Handle auto-stop at end
+            source.onended = () => {
+                if (Math.abs(ctx.currentTime - startTimeRef.current - buffer.duration) < 0.1) {
+                    setIsPlaying(false);
+                    pauseTimeRef.current = 0;
+                    setCurrentTime(0);
+                    cancelAnimationFrame(rafRef.current);
+                }
+            };
         });
 
         setIsPlaying(true);
 
-        // UI Loop
-        const loop = () => {
-            const now = ctx.currentTime;
-            const current = now - startTimeRef.current;
-
+        // Animation loop for UI update
+        const updateUI = () => {
+            const current = ctx.currentTime - startTimeRef.current;
             if (current >= duration) {
+                setCurrentTime(duration);
                 setIsPlaying(false);
-                pauseTimeRef.current = 0;
-                setCurrentTime(0);
-                stopAllSources();
-                return;
+            } else {
+                setCurrentTime(current);
+                rafRef.current = requestAnimationFrame(updateUI);
             }
-
-            setCurrentTime(current);
-            rafRef.current = requestAnimationFrame(loop);
         };
-        loop();
+        updateUI();
 
-    }, [stems, duration, volumes, muted]);
+    }, [isLoading, duration]);
 
-    const pause = useCallback(() => {
-        const ctx = audioContextRef.current;
-        pauseTimeRef.current = ctx.currentTime - startTimeRef.current;
-        stopAllSources();
+    const stop = useCallback(() => {
+        if (!audioContextRef.current) return;
+
+        Object.values(sourceNodesRef.current).forEach(source => {
+            try {
+                source.stop();
+                source.disconnect();
+            } catch (e) {
+                // Ignore errors if already stopped
+            }
+        });
+        sourceNodesRef.current = {};
         setIsPlaying(false);
         cancelAnimationFrame(rafRef.current);
-    }, []);
+
+        // Save pause time
+        if (isPlaying) {
+            pauseTimeRef.current = audioContextRef.current.currentTime - startTimeRef.current;
+        }
+    }, [isPlaying]);
 
     const togglePlay = useCallback(() => {
         if (isPlaying) {
-            pause();
+            stop();
         } else {
             play();
         }
-    }, [isPlaying, play, pause]);
+    }, [isPlaying, play, stop]);
 
     const seek = useCallback((time) => {
         const wasPlaying = isPlaying;
-        if (wasPlaying) {
-            stopAllSources();
-            cancelAnimationFrame(rafRef.current);
-        }
-
-        pauseTimeRef.current = time;
-        setCurrentTime(time);
+        stop();
+        pauseTimeRef.current = Math.max(0, Math.min(time, duration));
+        setCurrentTime(pauseTimeRef.current);
 
         if (wasPlaying) {
             play();
         }
-    }, [isPlaying, play]);
+    }, [isPlaying, duration, stop, play]);
 
     const setVolume = useCallback((name, val) => {
-        setVolumes(prev => ({ ...prev, [name]: val }));
-
-        // Update live gain node
-        const gainNode = gainNodesRef.current[name];
-        if (gainNode && !muted[name]) {
-            gainNode.gain.setValueAtTime(val, audioContextRef.current.currentTime);
+        if (gainNodesRef.current[name]) {
+            gainNodesRef.current[name].gain.value = muted[name] ? 0 : val;
         }
+        setVolumes(prev => ({ ...prev, [name]: val }));
     }, [muted]);
 
-    const toggleMute = useCallback((name) => {
-        const isNowMuted = !muted[name];
-        setMuted(prev => ({ ...prev, [name]: isNowMuted }));
+    const toggleMute = useCallback((name, solo = false) => {
+        if (solo) {
+            // Solo logic: mute everyone else, unmute target
+            const newMuted = {};
+            Object.keys(volumes).forEach(n => {
+                newMuted[n] = (n !== name);
+            });
 
-        // Update live gain node
-        const gainNode = gainNodesRef.current[name];
-        if (gainNode) {
-            const vol = isNowMuted ? 0 : (volumes[name] ?? 1.0);
-            gainNode.gain.setValueAtTime(vol, audioContextRef.current.currentTime);
+            // Apply to nodes
+            Object.entries(gainNodesRef.current).forEach(([n, node]) => {
+                node.gain.value = newMuted[n] ? 0 : volumes[n];
+            });
+            setMuted(newMuted);
+        } else {
+            // Normal toggle
+            const isNowMuted = !muted[name];
+            if (gainNodesRef.current[name]) {
+                gainNodesRef.current[name].gain.value = isNowMuted ? 0 : volumes[name];
+            }
+            setMuted(prev => ({ ...prev, [name]: isNowMuted }));
         }
-    }, [volumes, muted]);
+    }, [muted, volumes]);
 
     return {
         isPlaying,
@@ -234,6 +238,7 @@ export function useWebAudio(stems) {
         togglePlay,
         seek,
         setVolume,
-        toggleMute
+        toggleMute,
+        analyzerNodes: analyzerNodesRef.current
     };
 }

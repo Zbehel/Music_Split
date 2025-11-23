@@ -73,8 +73,9 @@ from pathlib import Path
 
 
 # Process pool for CPU-bound separation tasks — created at lifespan startup
+# Process pool for CPU-bound separation tasks — created at lifespan startup
 _process_pool: Optional[ProcessPoolExecutor] = None
-_PROCESS_POOL_MAX_WORKERS = int(os.environ.get("PROCESS_POOL_WORKERS", "2"))
+_PROCESS_POOL_MAX_WORKERS = 1 # Force 1 worker to prevent OOM and crashes
 
 # Redis / Celery config
 REDIS_URL = os.environ.get("REDIS_URL", None)
@@ -152,9 +153,37 @@ def _worker_separate(model_name: str, input_path: str, output_dir: str, device: 
     """
     # Import inside worker process to avoid issues with pickling model objects
     from src.separator import MusicSeparator
+    import gc
 
-    separator = MusicSeparator(model_name=model_name, device=device)
-    return separator.separate(str(input_path), str(output_dir))
+    try:
+        separator = MusicSeparator(model_name=model_name, device=device)
+        result = separator.separate(str(input_path), str(output_dir))
+        return result
+    finally:
+        # Force garbage collection to prevent memory leaks in worker process
+        if 'separator' in locals():
+            separator.unload_model()
+            del separator
+        gc.collect()
+
+def _commit_modal_volume():
+    """
+    Helper to commit Modal volume if running in Modal environment.
+    Returns True if commit succeeded, False otherwise.
+    """
+    try:
+        import modal
+        # Only commit if we're in Modal (JOBS_DIR is set)
+        if not os.environ.get("JOBS_DIR"):
+            return False
+            
+        volume = modal.Volume.lookup("music-split-jobs-data", create_if_missing=False)
+        if volume:
+            volume.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Failed to commit Modal volume: {e}")
+    return False
 
 def cleanup_old_sessions(max_age_seconds: int = 3600, max_to_check: int = 50):
     """
@@ -190,6 +219,10 @@ def cleanup_old_sessions(max_age_seconds: int = 3600, max_to_check: int = 50):
         
         if cleaned > 0:
             logger.info(f"Cleanup removed {cleaned} old sessions (checked {checked})")
+            # Commit volume after cleanup to persist deletions
+            if _commit_modal_volume():
+                logger.debug("Volume committed after cleanup")
+                
         return cleaned
     except Exception as e:
         logger.warning(f"Failed to cleanup old sessions: {e}")
@@ -336,10 +369,15 @@ app = FastAPI(
     version="2.1.0"
 )
 
-# CORS pour Gradio
+# CORS configuration - restrict to specific domains
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "https://music-split-frontend.pages.dev,http://localhost:5173,http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,  # Only your frontend domains
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -716,6 +754,11 @@ async def separate_audio(
                 job["status"] = "done"
                 job["result"] = res
                 separations_total.labels(model=model, status="success").inc()
+                
+                # CRITICAL: Commit Modal volume to persist files
+                if _commit_modal_volume():
+                    logger.info(f"Volume committed for session {job.get('session_id')}")
+                    
             except Exception as e:
                 job["status"] = "error"
                 job["error"] = str(e)
@@ -997,7 +1040,26 @@ def mix_stems(req: MixRequest):
     Mixes selected stems into a single WAV file.
     """
     session_path = TEMP_DIR / req.session_id / "output"
+    
+    # Ensure volume is up to date
+    try:
+        import modal
+        if hasattr(modal, 'volume'):
+            volume = modal.Volume.lookup("music-split-jobs-data", create_if_missing=False)
+            if volume:
+                volume.reload()
+                logger.debug(f"Volume reloaded for mix session {req.session_id}")
+    except Exception as e:
+        logger.warning(f"Failed to reload volume: {e}")
+
     if not session_path.exists():
+        # Debug logging
+        parent = TEMP_DIR / req.session_id
+        if parent.exists():
+            logger.warning(f"Session exists but output missing: {list(parent.iterdir())}")
+        else:
+            logger.warning(f"Session directory missing: {parent}")
+            
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Load and mix
@@ -1009,8 +1071,8 @@ def mix_stems(req: MixRequest):
     try:
         for stem, volume in req.stems.items():
             if volume > 0:
-                # Look for FLAC files 
-                stem_path = session_path / f"{stem}.flac"
+                # Look for OGG files 
+                stem_path = session_path / f"{stem}.ogg"
                 if stem_path.exists():
                     data, sr = sf.read(str(stem_path))
                     
@@ -1043,7 +1105,7 @@ def mix_stems(req: MixRequest):
         output_mix = session_path / "mix.flac"
         sf.write(str(output_mix), mixed_audio, sr)
         
-        return FileResponse(
+        return NoRangeFileResponse(
             path=str(output_mix),
             media_type="audio/flac",
             filename="mix.flac"
@@ -1062,7 +1124,10 @@ def download_stem(session_id: str, stem_name: str):
     """
     Télécharge un stem spécifique
     """
-    file_path = TEMP_DIR / session_id / "output" / f"{stem_name}.flac"
+    # OGG only
+    file_path = TEMP_DIR / session_id / "output" / f"{stem_name}.ogg"
+    media_type = "audio/ogg"
+    filename = f"{stem_name}.ogg"
     
     if not file_path.exists():
         logger.warning(
@@ -1071,18 +1136,18 @@ def download_stem(session_id: str, stem_name: str):
         )
         raise HTTPException(
             status_code=404,
-            detail=f"Fichier {stem_name}.flac non trouvé pour session {session_id}"
+            detail=f"Fichier {stem_name} non trouvé pour session {session_id}"
         )
     
     logger.info(
-        f"Stem download",
+        f"Stem download: {filename}",
         extra={"session_id": session_id, "stem_name": stem_name}
     )
     
-    return NoRangeFileResponse(
+    return FileResponse(
         path=str(file_path),
-        media_type="audio/flac",
-        filename=f"{stem_name}.flac"
+        media_type=media_type,
+        filename=filename
     )
 
 
@@ -1108,7 +1173,7 @@ def download_original(session_id: str):
         extra={"session_id": session_id}
     )
     
-    return NoRangeFileResponse(
+    return FileResponse(
         path=str(file_path),
         media_type="audio/wav",
         filename="original.wav"
@@ -1185,7 +1250,7 @@ def download_by_job(job_id: str, stem_name: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Stem not found for job")
 
-    return NoRangeFileResponse(path=str(file_path), media_type="audio/wav", filename=f"{stem_name}.wav")
+    return FileResponse(path=str(file_path), media_type="audio/wav", filename=f"{stem_name}.wav")
 
 
 @app.post("/clear-cache")
@@ -1208,6 +1273,10 @@ def cleanup_session(session_id: str):
     if session_path.exists():
         logger.info(f"Cleaning up session", extra={"session_id": session_id})
         shutil.rmtree(session_path)
+        
+        # Commit volume to persist deletion
+        _commit_modal_volume()
+        
         return {
             "status": "success",
             "message": "Session cleaned",
