@@ -3,6 +3,10 @@ name: Deploy to Modal & Cloudflare
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
   workflow_dispatch:
 
 jobs:
@@ -13,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: 'pip'
       - name: Install dependencies
         run: |
@@ -30,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: Install Modal
         run: pip install modal
       - name: Deploy to Modal (Production)
@@ -38,7 +42,7 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          modal token set --token-id $MODAL_TOKEN_ID --token-secret $MODAL_TOKEN_SECRET
+          # Modal CLI uses these environment variables automatically
           modal deploy --env prod deploy/modal/modal_app.py
           
   deploy-frontend:
