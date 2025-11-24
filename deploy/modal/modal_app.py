@@ -3,12 +3,16 @@ import os
 import sys
 from pathlib import Path
 
-# Define the image from Dockerfile
-# We assume the command is run from the project root
-image = modal.Image.from_dockerfile("deploy/docker/Dockerfile")
-# Mount the src directory for hot reloading
-# Dockerfile sets WORKDIR /app and copies src to /app/src
-image = image.add_local_dir("src", remote_path="/app/src")
+# Define the image natively for faster builds
+image = (
+    modal.Image.debian_slim(python_version="3.10")
+    .apt_install("ffmpeg", "libsndfile1", "git", "build-essential")
+    .pip_install_from_requirements(
+        "requirements.txt",
+        extra_index_url="https://download.pytorch.org/whl/cu121"
+    )
+    .add_local_dir("src", remote_path="/app/src")
+)
 
 app = modal.App("music-split-api", image=image)
 
@@ -20,6 +24,7 @@ jobs_volume = modal.Volume.from_name("music-split-jobs-data", create_if_missing=
 @app.function(
     image=image,
     gpu="T4", # Use T4 for cost effectiveness, or A10G for speed
+    memory=8192, # Increase memory to 8GB to prevent OOM
     timeout=600, # 10 minutes
     volumes={
         "/root/.cache/huggingface": hf_volume,

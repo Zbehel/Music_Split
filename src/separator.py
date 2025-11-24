@@ -10,6 +10,11 @@ import soundfile as sf
 from demucs.pretrained import get_model
 from demucs.apply import apply_model
 
+# CRITICAL: Disable PyTorch's internal multiprocessing to prevent SIGSEGV crashes
+# This prevents semaphore leaks and crashes during cleanup after separation
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -120,14 +125,52 @@ class MusicSeparator:
         sources = sources[0]  # Enlever batch
         results = {}
         
-        # Sauvegarder chaque stem avec soundfile
+        logger.info(f"📝 Starting to write {len(self.model_config['names'])} stems to disk...")
+        
+        # Process and write stems ONE AT A TIME to minimize VRAM usage
         for i, name in enumerate(self.model_config["names"]):
-            # Save each stem as OGG Vorbis (~10x smaller than WAV, ~5x smaller than FLAC)
-            f = out / f"{name}.ogg"
-            audio_np = sources[i].cpu().numpy().T  # (samples, channels)
-            sf.write(str(f), audio_np, self.model.samplerate, format='OGG', subtype='VORBIS')
-            results[name] = str(f)
-            logger.info(f"  ✅ {name}.ogg")
+            logger.info(f"🔄 Processing stem {i+1}/{len(self.model_config['names'])}: {name}")
+            
+            # Use FLAC instead of OGG - more stable for large files, still compressed
+            f = out / f"{name}.flac"
+            
+            # Extract single stem and immediately move to CPU to free VRAM
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+                logger.debug(f"  ✓ GPU synchronized for {name}")
+            
+            # Get this stem, move to CPU, and convert to numpy
+            logger.debug(f"  → Moving {name} tensor to CPU...")
+            stem_tensor = sources[i]
+            audio_np = stem_tensor.cpu().numpy().T  # (samples, channels)
+            logger.debug(f"  ✓ {name} converted to numpy: shape={audio_np.shape}")
+            
+            # Immediately delete the GPU tensor to free VRAM
+            del stem_tensor
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            
+            # Write to disk using FLAC (stable, lossless, ~50% compression)
+            logger.info(f"  💾 Writing {name}.flac to disk...")
+            try:
+                sf.write(str(f), audio_np, self.model.samplerate, format='FLAC', subtype='PCM_24')
+                file_size_mb = f.stat().st_size / (1024 * 1024)
+                logger.info(f"  ✅ {name}.flac written successfully ({file_size_mb:.2f} MB)")
+                results[name] = str(f)
+            except Exception as e:
+                logger.error(f"  ❌ FAILED to write {name}.flac: {e}", exc_info=True)
+                raise
+            
+            # Clean up numpy array
+            del audio_np
+            logger.debug(f"  ✓ {name} numpy array freed")
+        
+        logger.info("✅ All stems written successfully")
+        
+        # Clean up the entire sources tensor
+        del sources
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
         
         return results
     

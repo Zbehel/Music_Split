@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAudioSync } from './useAudioSync';
 import { Play, Pause, Volume2, VolumeX, Upload, Youtube, Download, Music, Layers, Activity, Settings, CheckCircle, AlertTriangle } from 'lucide-react';
 import axios from 'axios';
@@ -56,7 +56,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-import React from 'react';
+
 
 function AppContent() {
   // --- STATE ---
@@ -116,14 +116,6 @@ function AppContent() {
 
     console.log(`[Polling] Started for Job ID: ${jobId}`);
 
-    // Fake progress incrementer for visual feedback
-    const progressInterval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 90) return prev;
-        return prev + (prev < 50 ? 5 : 1);
-      });
-    }, 1000);
-
     // Status Poller
     const pollInterval = setInterval(async () => {
       try {
@@ -133,14 +125,10 @@ function AppContent() {
         if (data.status === 'done') {
           console.log("[Polling] Job Done!", data);
           clearInterval(pollInterval);
-          clearInterval(progressInterval);
-
           handleJobSuccess(data);
         } else if (data.status === 'error') {
           console.error("[Polling] Job Error:", data.error);
           clearInterval(pollInterval);
-          clearInterval(progressInterval);
-
           setStatus('error');
           setErrorMsg(data.error || "Processing failed on server.");
         } else {
@@ -156,25 +144,35 @@ function AppContent() {
 
     return () => {
       clearInterval(pollInterval);
-      clearInterval(progressInterval);
     };
   }, [status, jobId]);
 
   // --- HANDLERS ---
 
-  const handleJobSuccess = (data) => {
+  const handleJobSuccess = async (data) => {
     setProgress(100);
     setSessionId(data.session_id);
 
     // Construct stem objects
     const resultStems = data.result || {};
-    const newStems = Object.keys(resultStems).map(name => ({
-      name,
-      url: `${API_URL}/download/${data.session_id}/${name}`,
-      color: STEM_COLORS[name] || '#888'
-    }));
+    const stemNames = Object.keys(resultStems);
 
-    setStems(newStems);
+    // Load stems ONE AT A TIME to prevent memory exhaustion
+    const newStems = [];
+    for (const name of stemNames) {
+      newStems.push({
+        name,
+        url: `${API_URL}/download/${data.session_id}/${name}`,
+        color: STEM_COLORS[name] || '#888'
+      });
+
+      // Update UI incrementally as each stem is added
+      setStems([...newStems]);
+
+      // Small delay to allow browser to download and process one stem before starting the next
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
     setStatus('done');
   };
 
@@ -243,7 +241,7 @@ function AppContent() {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', 'mix.ogg');
+      link.setAttribute('download', 'mix.flac');
       document.body.appendChild(link);
       link.click();
     } catch (e) {
@@ -355,10 +353,6 @@ function AppContent() {
             <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
               <div className="flex justify-between text-xs text-indigo-300 mb-2 font-medium">
                 <span className="flex items-center gap-2"><Activity className="animate-spin" size={12} /> {status === 'uploading' ? 'Uploading...' : 'Processing...'}</span>
-                <span>{Math.round(progress)}%</span>
-              </div>
-              <div className="w-full bg-slate-700 rounded-full h-1.5 overflow-hidden">
-                <div className="bg-indigo-500 h-full rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
               </div>
             </div>
           )}
@@ -469,7 +463,7 @@ function AppContent() {
                       }
                     }}
                     src={stem.url}
-                    type="audio/ogg"
+                    type="audio/flac"
                     preload="auto"
                     crossOrigin="anonymous"
                   />
