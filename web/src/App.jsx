@@ -148,6 +148,33 @@ function AppContent() {
     };
   }, [status, jobId]);
 
+  // 3. Fake Progress Logic (Smoothly animate to 95% during processing)
+  useEffect(() => {
+    let interval;
+    if (status === 'processing') {
+      setProgress(0);
+      interval = setInterval(() => {
+        setProgress(prev => {
+          // Slow down as we get closer to 95%
+          if (prev >= 95) return 95;
+
+          // Variable increment based on current progress
+          // Fast at start, slower at end
+          let increment = 0;
+          if (prev < 30) increment = 2;       // 0-30%: Fast
+          else if (prev < 60) increment = 1;  // 30-60%: Medium
+          else if (prev < 80) increment = 0.5; // 60-80%: Slow
+          else increment = 0.2;               // 80-95%: Crawl
+
+          return Math.min(prev + increment, 95);
+        });
+      }, 500);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [status]);
+
   // --- HANDLERS ---
 
   const handleJobSuccess = async (data) => {
@@ -158,23 +185,33 @@ function AppContent() {
     const resultStems = data.result || {};
     const stemNames = Object.keys(resultStems);
 
-    // Load stems ONE AT A TIME to prevent memory exhaustion
-    const newStems = [];
-    for (const name of stemNames) {
-      newStems.push({
-        name,
-        url: `${API_URL}/download/${data.session_id}/${name}`,
-        color: STEM_COLORS[name] || '#888'
+    // Pre-fetch all stems as Blobs to ensure they are ready before display
+    try {
+      // Fetch in PARALLEL for faster loading
+      const promises = stemNames.map(async (name) => {
+        const url = `${API_URL}/download/${data.session_id}/${name}`;
+        const response = await fetch(url);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+
+        return {
+          name,
+          url: objectUrl, // Use local Blob URL
+          color: STEM_COLORS[name] || '#888'
+        };
       });
 
-      // Update UI incrementally as each stem is added
-      setStems([...newStems]);
+      const loadedStems = await Promise.all(promises);
 
-      // Small delay to allow browser to download and process one stem before starting the next
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Update UI only when ALL stems are ready
+      setStems(loadedStems);
+      setStatus('done');
+
+    } catch (e) {
+      console.error("Failed to load stems", e);
+      setErrorMsg("Failed to download separated stems.");
+      setStatus('error');
     }
-
-    setStatus('done');
   };
 
   const resetState = () => {
