@@ -185,6 +185,9 @@ function AppContent() {
     setProgress(0);
     setSessionId(null);
     setAudioElements({});
+    setMixDownloading(false);
+    setFile(null);
+    setYtUrl('');
   };
 
   const handleUpload = async () => {
