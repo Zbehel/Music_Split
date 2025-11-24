@@ -360,7 +360,7 @@ api_rate_limiter = RateLimiter(
 # Créer l'application FastAPI
 app = FastAPI(
     title="Music Source Separator API v2.1",
-    description="Sépare les pistes audio avec Demucs et MVSEP - WITH Monitoring",
+    description="Sépare les pistes audio avec Demucs  - WITH Monitoring",
     version="2.1.0"
 )
 
