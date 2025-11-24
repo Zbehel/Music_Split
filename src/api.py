@@ -10,6 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import uuid
 import asyncio
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Dict, Optional, Any
@@ -73,7 +78,6 @@ from pathlib import Path
 
 
 # Process pool for CPU-bound separation tasks — created at lifespan startup
-# Process pool for CPU-bound separation tasks — created at lifespan startup
 _process_pool: Optional[ProcessPoolExecutor] = None
 _PROCESS_POOL_MAX_WORKERS = int(os.environ.get("PROCESS_POOL_WORKERS", "1")) # Force 1 worker for stability
 
@@ -96,7 +100,6 @@ def _restart_process_pool():
 # Redis / Celery config
 REDIS_URL = os.environ.get("REDIS_URL", None)
 MAX_PENDING = int(os.environ.get("MAX_PENDING", "4"))
-MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "100"))
 MAX_DURATION_SECONDS = int(os.environ.get("MAX_DURATION_SECONDS", "600"))
 
 _redis_client: Optional[Any] = None
@@ -167,11 +170,27 @@ def _worker_separate(model_name: str, input_path: str, output_dir: str, device: 
     """Worker function executed in a separate process to load model and run separation.
     Must be top-level so it is picklable for ProcessPoolExecutor.
     """
-    # Import inside worker process to avoid issues with pickling model objects
-    from src.separator import MusicSeparator
+    print(f"[Worker] Starting separation for {input_path} on {device}...")
+    try:
+        # Import inside worker process to avoid issues with pickling model objects
+        from src.separator import MusicSeparator
+        import torch
+        
+        print(f"[Worker] Imports done. Torch version: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
 
-    separator = MusicSeparator(model_name=model_name, device=device)
-    return separator.separate(str(input_path), str(output_dir))
+        print(f"[Worker] Initializing MusicSeparator with model={model_name}...")
+        separator = MusicSeparator(model_name=model_name, device=device)
+        
+        print(f"[Worker] Starting separator.separate()...")
+        result = separator.separate(str(input_path), str(output_dir))
+        
+        print(f"[Worker] Separation finished successfully. Result: {list(result.keys())}")
+        return result
+    except Exception as e:
+        print(f"[Worker] CRITICAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise e
 
 def cleanup_old_sessions(max_age_seconds: int = 3600, max_to_check: int = 50):
     """
@@ -218,10 +237,9 @@ def _commit_modal_volume():
     """Helper to commit changes to the Modal volume."""
     try:
         import modal
-        # We need to lookup the volume by name as defined in modal_app.py
-        # "music-split-jobs-data"
+        # Use from_name to get the volume handle
         if hasattr(modal, "Volume"):
-             vol = modal.Volume.lookup("music-split-jobs-data", create_if_missing=False)
+             vol = modal.Volume.from_name("music-split-jobs-data", create_if_missing=False)
              if vol:
                  vol.commit()
                  logger.debug("✅ Modal volume committed")
@@ -675,18 +693,20 @@ async def separate_audio(
         try:
             info = sf.info(str(input_file))
             duration_seconds = float(info.frames) / float(info.samplerate)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Could not determine audio duration: {e}")
             duration_seconds = None
 
-        if duration_seconds is not None and duration_seconds > MAX_DURATION_SECONDS:
-            shutil.rmtree(temp_path, ignore_errors=True)
-            raise HTTPException(status_code=413, detail=f"Audio duration {duration_seconds:.0f}s exceeds maximum allowed {MAX_DURATION_SECONDS}s")
-
-        # Validate file size
-        max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-        if file_size > max_bytes:
-            shutil.rmtree(temp_path, ignore_errors=True)
-            raise HTTPException(status_code=413, detail=f"File size {file_size} bytes exceeds maximum allowed {max_bytes} bytes")
+        # Log duration check for debugging
+        if duration_seconds is not None:
+            duration_ok = duration_seconds <= MAX_DURATION_SECONDS
+            logger.info(f"Audio duration: {duration_seconds:.1f}s (limit: {MAX_DURATION_SECONDS}s, OK: {duration_ok})")
+            
+            if not duration_ok:
+                shutil.rmtree(temp_path, ignore_errors=True)
+                raise HTTPException(status_code=413, detail=f"Audio duration {duration_seconds:.0f}s exceeds maximum allowed {MAX_DURATION_SECONDS}s")
+        else:
+            logger.warning("Duration check skipped - could not determine duration")
 
         now_ts = time.time()
 
@@ -718,18 +738,18 @@ async def separate_audio(
                 "download_template": f"/download/status/{job_id}/{{stem_name}}"
             }
 
-        # Local Pool Fallback
-        if _process_pool is None:
-             raise HTTPException(status_code=503, detail="Backend unavailable")
-
+        # DEBUGGING: Run synchronously instead of using process pool
+        # This makes errors immediately visible instead of hidden in worker crashes
+        logger.info("🔧 DEBUG MODE: Running separation synchronously (process pool disabled)")
+        
         job_id = uuid.uuid4().hex
         JOBS[job_id] = {
-            "status": "pending",
+            "status": "running",
             "model": separation_model,
             "device": SELECTED_DEVICE,
             "session_id": temp_path.name,
             "submitted_at": now_ts,
-            "started_at": None,
+            "started_at": time.time(),
             "finished_at": None,
             "result": None,
             "error": None,
@@ -737,97 +757,24 @@ async def separate_audio(
             "output_dir": str(output_dir),
             "source": "upload"
         }
-
-        def _on_done(fut, job_id=job_id, model=separation_model):
-            # Reload job to get latest state
-            job = JOBS.get(job_id)
-            if not job:
-                return
-
-            job["finished_at"] = time.time()
-            try:
-                res = fut.result()
-                job["status"] = "done"
-                job["result"] = res
-                separations_total.labels(model=model, status="success").inc()
-            except Exception as e:
-                job["status"] = "error"
-                job["error"] = str(e)
-                separations_total.labels(model=model, status="error").inc()
-                # Check for broken pool
-                if "process pool is not usable" in str(e).lower() or "terminated abruptly" in str(e).lower():
-                    logger.critical("🚨 Process Pool Broken! Triggering restart...")
-                    
-                    # 🚑 RESCUE STRATEGY: Check if files actually exist
-                    out_dir = Path(job.get("output_dir", ""))
-                    if out_dir.exists():
-                        stems = list(out_dir.glob("*.ogg"))
-                        if len(stems) >= 4: # Assuming at least 4 stems (vocals, drums, bass, other)
-                            logger.info(f"🚑 Rescue: Found {len(stems)} stems despite crash. Marking as DONE.")
-                            job["status"] = "done"
-                            job["error"] = None
-                            # Reconstruct result dict
-                            job["result"] = {s.stem: str(s) for s in stems}
-                            separations_total.labels(model=model, status="rescued").inc()
-                            _commit_modal_volume()
-                        else:
-                            logger.warning(f"🚑 Rescue failed: Only found {len(stems)} stems.")
-                    
-                    _restart_process_pool()
-            else:
-                # ✅ Commit volume immediately after success
-                _commit_modal_volume()
-            finally:
-                 try:
-                    process_pool_busy.dec()
-                    running_jobs.dec()
-                 except: pass
+        
+        try:
+            # Run separation directly in main process
+            result = _worker_separate(separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
             
-            # Explicitly save back to trigger persistence
-            JOBS[job_id] = job
-
-        # Update job status to running and persist
-        job = JOBS[job_id]
-        job["status"] = "running"
-        job["started_at"] = time.time()
-        JOBS[job_id] = job
-        
-        # Check if process pool is available
-        # Check if process pool is available
-        if _process_pool is None:
-             _restart_process_pool()
-             
-        if _process_pool is None:
-            job["status"] = "error"
-            job["error"] = "Process pool not initialized"
-            JOBS[job_id] = job
-            shutil.rmtree(temp_path, ignore_errors=True)
-            raise HTTPException(status_code=503, detail="Server not ready - process pool unavailable")
-        
-        try:
-            process_pool_busy.inc()
-            running_jobs.inc()
-        except: pass
-        
-        try:
-            future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+            JOBS[job_id]["status"] = "done"
+            JOBS[job_id]["result"] = result
+            JOBS[job_id]["finished_at"] = time.time()
+            separations_total.labels(model=separation_model, status="success").inc()
+            _commit_modal_volume()
+            
         except Exception as e:
-            if "process pool is not usable" in str(e).lower() or "brokenprocesspool" in str(e).lower():
-                logger.warning("⚠️ Pool broken during submission. Restarting and retrying...")
-                _restart_process_pool()
-                if _process_pool:
-                     future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
-                else:
-                    raise HTTPException(status_code=503, detail="Backend unavailable after restart")
-            else:
-                raise e
+            logger.error(f"❌ Separation failed: {e}", exc_info=True)
+            JOBS[job_id]["status"] = "error"
+            JOBS[job_id]["error"] = str(e)
+            JOBS[job_id]["finished_at"] = time.time()
+            separations_total.labels(model=separation_model, status="error").inc()
         
-        # Attach future to memory copy (JobManager handles this)
-        job["future"] = future
-        JOBS[job_id] = job
-        
-        future.add_done_callback(_on_done)
-
         return {
             "status": "accepted",
             "job_id": job_id,
@@ -920,7 +867,7 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
     temp_path.mkdir(parents=True, exist_ok=True)
     
     # Cleanup old sessions (limited to prevent slowdown)
-    cleanup_old_sessions(max_age_seconds=3600, max_to_check=20)
+    # cleanup_old_sessions(max_age_seconds=3600, max_to_check=20)
     
     output_dir = temp_path / "output"
     output_dir.mkdir(exist_ok=True)
@@ -1010,7 +957,7 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
                     # 🚑 RESCUE STRATEGY: Check if files actually exist
                     out_dir = Path(job.get("output_dir", ""))
                     if out_dir.exists():
-                        stems = list(out_dir.glob("*.ogg"))
+                        stems = list(out_dir.glob("*.flac"))
                         if len(stems) >= 4: # Assuming at least 4 stems
                             logger.info(f"🚑 Rescue: Found {len(stems)} stems despite crash. Marking as DONE.")
                             job["status"] = "done"
@@ -1121,7 +1068,7 @@ def mix_stems(req: MixRequest):
         for stem, volume in req.stems.items():
             if volume > 0:
                 # Look for OGG files 
-                stem_path = session_path / f"{stem}.ogg"
+                stem_path = session_path / f"{stem}.flac"
                 if stem_path.exists():
                     data, sr = sf.read(str(stem_path))
                     
@@ -1151,13 +1098,13 @@ def mix_stems(req: MixRequest):
         if max_val > 1.0:
             mixed_audio = mixed_audio / max_val
 
-        output_mix = session_path / "mix.ogg"
-        sf.write(str(output_mix), mixed_audio, sr, format='OGG', subtype='VORBIS')
+        output_mix = session_path / "mix.flac"
+        sf.write(str(output_mix), mixed_audio, sr, format='FLAC', subtype='PCM_24')
         
         return FileResponse(
             path=str(output_mix),
-            media_type="audio/ogg",
-            filename="mix.ogg"
+            media_type="audio/flac",
+            filename="mix.flac"
         )
 
     except HTTPException:
@@ -1175,12 +1122,12 @@ def download_stem(session_id: str, stem_name: str):
     """
     # Handle stem_name with or without extension
     clean_name = stem_name
-    if clean_name.endswith(".ogg"):
+    if clean_name.endswith(".flac"):
         clean_name = clean_name[:-4]
         
-    file_path = TEMP_DIR / session_id / "output" / f"{clean_name}.ogg"
-    media_type = "audio/ogg"
-    filename = f"{clean_name}.ogg"
+    file_path = TEMP_DIR / session_id / "output" / f"{clean_name}.flac"
+    media_type = "audio/flac"
+    filename = f"{clean_name}.flac"
     
     if not file_path.exists():
         logger.warning(
@@ -1199,8 +1146,8 @@ def download_stem(session_id: str, stem_name: str):
     
     return NoRangeFileResponse(
         path=str(file_path),
-        media_type="audio/ogg",
-        filename=f"{stem_name}.ogg"
+        media_type="audio/flac",
+        filename=f"{stem_name}.flac"
     )
 
 
