@@ -381,6 +381,21 @@ function AppContent() {
               </select>
               <Settings className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" size={14} />
             </div>
+
+            {/* Model Explanation */}
+            <div className="mt-1 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg text-xs text-slate-400">
+              <div className="font-medium text-slate-300 mb-2">🎯 Models choice:</div>
+              <div className="space-y-1.5">
+                <div>
+                  <span className="font-mono text-indigo-400">htdemucs_6s</span>: 6 stems, faster processing
+                  <div className="text-slate-500 text-[10px] ml-4">vocals, drums, bass, guitar, piano, and other</div>
+                </div>
+                <div>
+                  <span className="font-mono text-cyan-400">htdemucs_ft</span>: 4 stems, higher quality
+                  <div className="text-slate-500 text-[10px] ml-4">vocals, drums, bass, and other</div>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Action Button */}

@@ -15,13 +15,6 @@ STEM_CONFIGS = {
         "desc": "4 stems haute qualité",
         "emoji": ["🥁", "🎸", "🎼", "🎤"],
     },
-    "mvsep_full": {
-        "name": "MVSEP Full",
-        "description": "Vocals, Drums, Bass, Other",
-        "stems": ["drums", "bass", "other","vocals"],
-        "desc": "4 stems complet",
-        "emoji": ["🥁", "🎸", "🎼", "🎤"],
-    },
 }
 
 # Helper functions
