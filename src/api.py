@@ -738,18 +738,18 @@ async def separate_audio(
                 "download_template": f"/download/status/{job_id}/{{stem_name}}"
             }
 
-        # DEBUGGING: Run synchronously instead of using process pool
-        # This makes errors immediately visible instead of hidden in worker crashes
-        logger.info("🔧 DEBUG MODE: Running separation synchronously (process pool disabled)")
-        
+        # Local Pool Fallback
+        if _process_pool is None:
+             raise HTTPException(status_code=503, detail="Backend unavailable")
+
         job_id = uuid.uuid4().hex
         JOBS[job_id] = {
-            "status": "running",
+            "status": "pending",
             "model": separation_model,
             "device": SELECTED_DEVICE,
             "session_id": temp_path.name,
             "submitted_at": now_ts,
-            "started_at": time.time(),
+            "started_at": None,
             "finished_at": None,
             "result": None,
             "error": None,
@@ -757,24 +757,80 @@ async def separate_audio(
             "output_dir": str(output_dir),
             "source": "upload"
         }
+
+        def _on_done(fut, job_id=job_id, model=separation_model):
+            # Reload job to get latest state
+            job = JOBS.get(job_id)
+            if not job:
+                return
+
+            job["finished_at"] = time.time()
+            try:
+                res = fut.result()
+                job["status"] = "done"
+                job["result"] = res
+                separations_total.labels(model=model, status="success").inc()
+            except Exception as e:
+                job["status"] = "error"
+                job["error"] = str(e)
+                separations_total.labels(model=model, status="error").inc()
+                # Check for broken pool
+                if "process pool is not usable" in str(e).lower() or "terminated abruptly" in str(e).lower():
+                    logger.critical("🚨 Process Pool Broken! Triggering restart...")
+                    _restart_process_pool()
+            else:
+                # ✅ Commit volume immediately after success
+                _commit_modal_volume()
+            finally:
+                 try:
+                    process_pool_busy.dec()
+                    running_jobs.dec()
+                 except: pass
+            
+            # Explicitly save back to trigger persistence
+            JOBS[job_id] = job
+
+        # Update job status to running and persist
+        job = JOBS[job_id]
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        JOBS[job_id] = job
+        
+        # Check if process pool is available
+        if _process_pool is None:
+             _restart_process_pool()
+             
+        if _process_pool is None:
+            job["status"] = "error"
+            job["error"] = "Process pool not initialized"
+            JOBS[job_id] = job
+            shutil.rmtree(temp_path, ignore_errors=True)
+            raise HTTPException(status_code=503, detail="Server not ready - process pool unavailable")
         
         try:
-            # Run separation directly in main process
-            result = _worker_separate(separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
-            
-            JOBS[job_id]["status"] = "done"
-            JOBS[job_id]["result"] = result
-            JOBS[job_id]["finished_at"] = time.time()
-            separations_total.labels(model=separation_model, status="success").inc()
-            _commit_modal_volume()
-            
-        except Exception as e:
-            logger.error(f"❌ Separation failed: {e}", exc_info=True)
-            JOBS[job_id]["status"] = "error"
-            JOBS[job_id]["error"] = str(e)
-            JOBS[job_id]["finished_at"] = time.time()
-            separations_total.labels(model=separation_model, status="error").inc()
+            process_pool_busy.inc()
+            running_jobs.inc()
+        except: pass
         
+        try:
+            future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+        except Exception as e:
+            if "process pool is not usable" in str(e).lower() or "brokenprocesspool" in str(e).lower():
+                logger.warning("⚠️ Pool broken during submission. Restarting and retrying...")
+                _restart_process_pool()
+                if _process_pool:
+                    future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+                else:
+                    raise HTTPException(status_code=503, detail="Backend unavailable after restart")
+            else:
+                raise e
+        
+        # Attach future to memory copy (JobManager handles this)
+        job["future"] = future
+        JOBS[job_id] = job
+        
+        future.add_done_callback(_on_done)
+
         return {
             "status": "accepted",
             "job_id": job_id,
@@ -958,7 +1014,11 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
                     out_dir = Path(job.get("output_dir", ""))
                     if out_dir.exists():
                         stems = list(out_dir.glob("*.flac"))
-                        if len(stems) >= 4: # Assuming at least 4 stems
+                        # Get expected stem count from model config
+                        expected_stems = len(STEM_CONFIGS.get(model, {}).get("stems", []))
+                        min_stems = max(4, expected_stems)  # At least 4, or model's expected count
+                        
+                        if len(stems) >= min_stems:
                             logger.info(f"🚑 Rescue: Found {len(stems)} stems despite crash. Marking as DONE.")
                             job["status"] = "done"
                             job["error"] = None
