@@ -223,7 +223,7 @@ if audio.has_clipping():
 ```python
 # Cache results for identical files
 cache_key = hashlib.sha256(audio_bytes).hexdigest()
-if cached_result := redis.get(cache_key):
+if cached_result := cache.get(cache_key):
     return cached_result
 ```
 

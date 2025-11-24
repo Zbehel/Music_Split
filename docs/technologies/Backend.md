@@ -18,5 +18,3 @@ The core functionality of music separation is powered by deep learning models.
 *   **yt-dlp**: A command-line program to download videos from YouTube.com and other video sites. It is used to fetch audio from YouTube links provided by the user.
 
 ## ⚡ Asynchronous Processing
-*   **Celery**: A distributed task queue used to handle long-running separation jobs in the background, ensuring the API remains responsive.
-*   **Redis**: An in-memory data structure store, used as a message broker for Celery and for caching.

@@ -2,7 +2,6 @@
 FastAPI backend pour Music Source Separator v2.1
 WITH: Monitoring, Structured Logging, Resilience Patterns
 """
-
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request, Response
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -97,24 +96,8 @@ def _restart_process_pool():
     except Exception as e:
         logger.error(f"❌ Failed to restart process pool: {e}")
 
-# Redis / Celery config
-REDIS_URL = os.environ.get("REDIS_URL", None)
 MAX_PENDING = int(os.environ.get("MAX_PENDING", "4"))
 MAX_DURATION_SECONDS = int(os.environ.get("MAX_DURATION_SECONDS", "600"))
-
-_redis_client: Optional[Any] = None
-USE_CELERY = False
-if REDIS_URL and redis is not None:
-    try:
-        tmp_redis = redis.from_url(REDIS_URL)
-        # quick ping
-        tmp_redis.ping()
-        _redis_client = tmp_redis
-        USE_CELERY = True
-    except Exception:
-        USE_CELERY = False
-else:
-    USE_CELERY = False
 
 
 # ✅ Import stems config
@@ -157,13 +140,6 @@ from src.resilience import (
     RateLimitExceeded,
     RetryExhausted
 )
-
-if USE_CELERY:
-    try:
-        from src.celery_app import celery  # noqa: F401
-        from src.tasks import separate_task  # noqa: F401
-    except Exception:
-        USE_CELERY = False
 
 
 def _worker_separate(model_name: str, input_path: str, output_dir: str, device: Optional[str] = None) -> Dict[str, str]:
@@ -710,34 +686,6 @@ async def separate_audio(
 
         now_ts = time.time()
 
-        # Celery check
-        if USE_CELERY and _redis_client is not None:
-             from src.celery_app import celery
-             async_result = celery.send_task("src.tasks.separate_task", args=[separation_model, str(input_file), str(output_dir), SELECTED_DEVICE])
-             job_id = async_result.id
-             JOBS[job_id] = {
-                "status": "pending",
-                "model": separation_model,
-                "device": SELECTED_DEVICE,
-                "session_id": temp_path.name,
-                "submitted_at": now_ts,
-                "started_at": None,
-                "finished_at": None,
-                "result": None,
-                "error": None,
-                "file_size": file_size,
-                "output_dir": str(output_dir),
-                "celery_id": async_result.id,
-                "source": "upload"
-            }
-             return {
-                "status": "accepted",
-                "job_id": job_id,
-                "session_id": temp_path.name,
-                "status_url": f"/status/{job_id}",
-                "download_template": f"/download/status/{job_id}/{{stem_name}}"
-            }
-
         # Local Pool Fallback
         if _process_pool is None:
              raise HTTPException(status_code=503, detail="Backend unavailable")
@@ -939,35 +887,6 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
         
         now_ts = time.time()
         
-        # Celery check
-        if USE_CELERY and _redis_client is not None:
-             # ... (Logic identical to /separate for Celery submission)
-             from src.celery_app import celery
-             async_result = celery.send_task("src.tasks.separate_task", args=[yt_req.model_name, str(input_file), str(output_dir), SELECTED_DEVICE])
-             job_id = async_result.id
-             JOBS[job_id] = {
-                "status": "pending",
-                "model": yt_req.model_name,
-                "device": SELECTED_DEVICE,
-                "session_id": temp_path.name,
-                "submitted_at": now_ts,
-                "started_at": None,
-                "finished_at": None,
-                "result": None,
-                "error": None,
-                "file_size": file_size,
-                "output_dir": str(output_dir),
-                "celery_id": async_result.id,
-                "source": "youtube",
-                "original_url": yt_req.url
-            }
-             return {
-                "status": "accepted",
-                "job_id": job_id,
-                "session_id": temp_path.name,
-                "status_url": f"/status/{job_id}",
-            }
-
         # Local Pool Fallback
         if _process_pool is None:
              raise HTTPException(status_code=503, detail="Backend unavailable")
@@ -1246,35 +1165,7 @@ def get_job_status(job_id: str):
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    # If Celery used, prefer AsyncResult state
     resp = {k: v for k, v in job.items() if k != "future"}
-    if USE_CELERY and job.get("celery_id"):
-        try:
-            from src.celery_app import celery
-
-            async_res = celery.AsyncResult(job.get("celery_id"))
-            state = async_res.state
-            if state == "PENDING":
-                resp["status"] = "pending"
-            elif state in ("STARTED", "RETRY"):
-                resp["status"] = "running"
-            elif state == "SUCCESS":
-                resp["status"] = "done"
-                try:
-                    resp["result"] = async_res.result
-                except Exception:
-                    resp["result"] = None
-            elif state == "FAILURE":
-                resp["status"] = "error"
-                try:
-                    resp["error"] = str(async_res.result)
-                except Exception:
-                    resp["error"] = "task failure"
-            else:
-                resp["status"] = state.lower()
-        except Exception:
-            resp["status"] = job.get("status")
-
     return resp
 
 
@@ -1285,22 +1176,8 @@ def download_by_job(job_id: str, stem_name: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # For Celery-backed jobs, consult task state
-    if USE_CELERY and job.get("celery_id"):
-        try:
-            from src.celery_app import celery
-            async_res = celery.AsyncResult(job.get("celery_id"))
-            if async_res.state != "SUCCESS":
-                raise HTTPException(status_code=409, detail=f"Job not finished (state={async_res.state})")
-        except HTTPException:
-            raise
-        except Exception:
-            # if we cannot query celery, fall back to stored status
-            if job.get("status") != "done":
-                raise HTTPException(status_code=409, detail=f"Job not finished (status={job.get('status')})")
-    else:
-        if job.get("status") != "done":
-            raise HTTPException(status_code=409, detail=f"Job not finished (status={job.get('status')})")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"Job not finished (status={job.get('status')})")
 
     output_dir = job.get("output_dir")
     if not output_dir:
