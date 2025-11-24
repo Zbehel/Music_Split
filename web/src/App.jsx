@@ -60,7 +60,7 @@ class ErrorBoundary extends React.Component {
 
 function AppContent() {
   // --- STATE ---
-  const [mode, setMode] = useState('upload'); // 'upload' | 'youtube'
+  const [mode, setMode] = useState('youtube'); // 'upload' | 'youtube'
   const [file, setFile] = useState(null);
   const [ytUrl, setYtUrl] = useState('');
 
@@ -75,6 +75,7 @@ function AppContent() {
   const [stems, setStems] = useState([]);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState('htdemucs_6s');
+  const [mixDownloading, setMixDownloading] = useState(false);
 
   // Audio Refs
   const [audioElements, setAudioElements] = useState({});
@@ -225,8 +226,9 @@ function AppContent() {
   };
 
   const handleMixDownload = async () => {
-    if (!sessionId) return;
+    if (!sessionId || mixDownloading) return;
 
+    setMixDownloading(true);
     const mixPayload = {
       session_id: sessionId,
       stems: {}
@@ -247,6 +249,8 @@ function AppContent() {
     } catch (e) {
       console.error("Mix download failed", e);
       alert("Failed to download mix.");
+    } finally {
+      setMixDownloading(false);
     }
   };
 
@@ -353,6 +357,10 @@ function AppContent() {
             <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
               <div className="flex justify-between text-xs text-indigo-300 mb-2 font-medium">
                 <span className="flex items-center gap-2"><Activity className="animate-spin" size={12} /> {status === 'uploading' ? 'Uploading...' : 'Processing...'}</span>
+                <span>{Math.round(progress)}%</span>
+              </div>
+              <div className="w-full bg-slate-700 rounded-full h-1.5 overflow-hidden">
+                <div className="bg-indigo-500 h-full rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
               </div>
             </div>
           )}
@@ -424,13 +432,24 @@ function AppContent() {
                     />
                   </div>
 
-                  <button
-                    onClick={handleMixDownload}
-                    className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-                    title="Download mix with current volume settings"
-                  >
-                    <Download size={16} /> Download Mix
-                  </button>
+                  <div className="flex flex-col gap-1">
+                    <button
+                      onClick={handleMixDownload}
+                      disabled={mixDownloading}
+                      className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {mixDownloading ? (
+                        <>
+                          <Activity className="animate-spin" size={16} /> Processing...
+                        </>
+                      ) : (
+                        <>
+                          <Download size={16} /> Download Mix
+                        </>
+                      )}
+                    </button>
+                    <p className="text-xs text-slate-400 text-center">Download mix with current volume settings</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -447,7 +466,7 @@ function AppContent() {
 
         {/* Bottom Section: Stems Grid */}
         <div className="flex-1 p-8 md:overflow-y-auto bg-slate-900/30">
-          {status === 'done' && stems.length > 0 ? (
+          {status === 'done' && stems.length > 0 && stems.every(s => s && s.url) ? (
             <div className="w-full grid gap-3 pb-20">
               {stems.map((stem) => (
                 <div
