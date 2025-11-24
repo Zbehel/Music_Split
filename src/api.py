@@ -213,6 +213,23 @@ def cleanup_old_sessions(max_age_seconds: int = 3600, max_to_check: int = 50):
         return 0
 
 
+
+def _commit_modal_volume():
+    """Helper to commit changes to the Modal volume."""
+    try:
+        import modal
+        # We need to lookup the volume by name as defined in modal_app.py
+        # "music-split-jobs-data"
+        if hasattr(modal, "Volume"):
+             vol = modal.Volume.lookup("music-split-jobs-data", create_if_missing=False)
+             if vol:
+                 vol.commit()
+                 logger.debug("✅ Modal volume committed")
+    except Exception as e:
+        # Don't let volume commit failure break the app
+        logger.warning(f"⚠️ Failed to commit Modal volume: {e}")
+
+
 def download_youtube_audio(url: str, output_dir: Path) -> Path:
     """Downloads audio from YouTube URL to output_dir/input.wav"""
     
@@ -737,11 +754,29 @@ async def separate_audio(
                 job["status"] = "error"
                 job["error"] = str(e)
                 separations_total.labels(model=model, status="error").inc()
-                
                 # Check for broken pool
                 if "process pool is not usable" in str(e).lower() or "terminated abruptly" in str(e).lower():
                     logger.critical("🚨 Process Pool Broken! Triggering restart...")
+                    
+                    # 🚑 RESCUE STRATEGY: Check if files actually exist
+                    out_dir = Path(job.get("output_dir", ""))
+                    if out_dir.exists():
+                        stems = list(out_dir.glob("*.ogg"))
+                        if len(stems) >= 4: # Assuming at least 4 stems (vocals, drums, bass, other)
+                            logger.info(f"🚑 Rescue: Found {len(stems)} stems despite crash. Marking as DONE.")
+                            job["status"] = "done"
+                            job["error"] = None
+                            # Reconstruct result dict
+                            job["result"] = {s.stem: str(s) for s in stems}
+                            separations_total.labels(model=model, status="rescued").inc()
+                            _commit_modal_volume()
+                        else:
+                            logger.warning(f"🚑 Rescue failed: Only found {len(stems)} stems.")
+                    
                     _restart_process_pool()
+            else:
+                # ✅ Commit volume immediately after success
+                _commit_modal_volume()
             finally:
                  try:
                     process_pool_busy.dec()
@@ -774,7 +809,18 @@ async def separate_audio(
             running_jobs.inc()
         except: pass
         
-        future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+        try:
+            future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+        except Exception as e:
+            if "process pool is not usable" in str(e).lower() or "brokenprocesspool" in str(e).lower():
+                logger.warning("⚠️ Pool broken during submission. Restarting and retrying...")
+                _restart_process_pool()
+                if _process_pool:
+                     future = _process_pool.submit(_worker_separate, separation_model, str(input_file), str(output_dir), SELECTED_DEVICE)
+                else:
+                    raise HTTPException(status_code=503, detail="Backend unavailable after restart")
+            else:
+                raise e
         
         # Attach future to memory copy (JobManager handles this)
         job["future"] = future
@@ -956,6 +1002,30 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
                 job["status"] = "error"
                 job["error"] = str(e)
                 separations_total.labels(model=model, status="error").inc()
+                
+                # Check for broken pool
+                if "process pool is not usable" in str(e).lower() or "terminated abruptly" in str(e).lower():
+                    logger.critical("🚨 Process Pool Broken (YouTube)! Triggering restart...")
+                    
+                    # 🚑 RESCUE STRATEGY: Check if files actually exist
+                    out_dir = Path(job.get("output_dir", ""))
+                    if out_dir.exists():
+                        stems = list(out_dir.glob("*.ogg"))
+                        if len(stems) >= 4: # Assuming at least 4 stems
+                            logger.info(f"🚑 Rescue: Found {len(stems)} stems despite crash. Marking as DONE.")
+                            job["status"] = "done"
+                            job["error"] = None
+                            # Reconstruct result dict
+                            job["result"] = {s.stem: str(s) for s in stems}
+                            separations_total.labels(model=model, status="rescued").inc()
+                            _commit_modal_volume()
+                        else:
+                            logger.warning(f"🚑 Rescue failed: Only found {len(stems)} stems.")
+
+                    _restart_process_pool()
+            else:
+                # ✅ Commit volume immediately after success
+                _commit_modal_volume()
             finally:
                  try:
                     process_pool_busy.dec()
@@ -972,6 +1042,10 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
         JOBS[job_id] = job
         
         # Check if process pool is available
+        # Check if process pool is available
+        if _process_pool is None:
+             _restart_process_pool()
+             
         if _process_pool is None:
             job["status"] = "error"
             job["error"] = "Process pool not initialized"
@@ -984,7 +1058,18 @@ async def separate_youtube(request: Request, yt_req: YouTubeRequest):
             running_jobs.inc()
         except: pass
         
-        future = _process_pool.submit(_worker_separate, yt_req.model_name, str(input_file), str(output_dir), SELECTED_DEVICE)
+        try:
+            future = _process_pool.submit(_worker_separate, yt_req.model_name, str(input_file), str(output_dir), SELECTED_DEVICE)
+        except Exception as e:
+            if "process pool is not usable" in str(e).lower() or "brokenprocesspool" in str(e).lower():
+                logger.warning("⚠️ Pool broken during submission (YouTube). Restarting and retrying...")
+                _restart_process_pool()
+                if _process_pool:
+                     future = _process_pool.submit(_worker_separate, yt_req.model_name, str(input_file), str(output_dir), SELECTED_DEVICE)
+                else:
+                    raise HTTPException(status_code=503, detail="Backend unavailable after restart")
+            else:
+                raise e
         # Future cannot be persisted, but we keep it in memory dict via JobManager (it handles this)
         # Wait, JobManager.__setitem__ removes 'future' before saving to disk, but keeps it in memory!
         # So we can just set it on the dict in memory?
@@ -1114,8 +1199,8 @@ def download_stem(session_id: str, stem_name: str):
     
     return NoRangeFileResponse(
         path=str(file_path),
-        media_type="audio/flac",
-        filename=f"{stem_name}.flac"
+        media_type="audio/ogg",
+        filename=f"{stem_name}.ogg"
     )
 
 

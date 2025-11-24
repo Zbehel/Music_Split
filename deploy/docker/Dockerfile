@@ -1,34 +1,34 @@
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Installer dépendances système
+# Install system dependencies
+# git and build-essential are often needed for pip installs
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsndfile1 \
     curl \
+    git \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copier requirements
+# Copy requirements
 COPY requirements.txt .
-# Use the Python executable to run pip to ensure packages install into the same environment
-RUN python -m pip install --upgrade pip setuptools wheel || true
-RUN ( /opt/conda/bin/python -m pip install --no-cache-dir -r requirements.txt ) || \
-    ( python -m pip install --no-cache-dir -r requirements.txt ) || \
-    ( echo "Primary pip install failed, retrying specific packages with conda/python pip" && /opt/conda/bin/python -m pip install --no-cache-dir celery redis prometheus-client || python -m pip install --no-cache-dir celery redis prometheus-client )
 
-# Copier code
+# Install dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy code
 COPY src/ ./src/
 
-# Variables d'environnement par défaut (peuvent être surchargées)
+# Env vars
 ENV MODEL_NAME=htdemucs
-ENV DEVICE=cpu
+ENV DEVICE=cuda
 ENV API_HOST=0.0.0.0
 ENV API_PORT=8000
 ENV MAX_FILE_SIZE_MB=100
 ENV MAX_DURATION_SECONDS=600
 
-
-# Commande par défaut
-# Commande par défaut (supporte la variable PORT injectée par Cloud Run)
+# Default command
 CMD ["sh", "-c", "uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000}"]
