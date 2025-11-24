@@ -236,6 +236,7 @@ $RECYCLE.BIN/
 .env.local
 .env.*.local
 *.env
+web/.env.development
 
 # Config locale
 config.local.yaml
