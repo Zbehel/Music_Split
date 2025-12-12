@@ -367,7 +367,7 @@ app = FastAPI(
 # CORS pour Gradio
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://music-split-frontend.pages.dev"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
