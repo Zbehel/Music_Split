@@ -299,3 +299,5 @@ exports/
 
 # Archives
 arx/
+
+*cookies.txt
